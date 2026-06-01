@@ -1,0 +1,9 @@
+PySide6
+requests
+pillow
+yt-dlp
+python-vlc
+openai
+websocket-client
+pycaw
+comtypes

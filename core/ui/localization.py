@@ -1,0 +1,752 @@
+import re
+
+
+LANGUAGE_ENGLISH = "en"
+LANGUAGE_ARABIC = "ar"
+DEFAULT_LANGUAGE = LANGUAGE_ENGLISH
+LANGUAGE_CHOICES = (
+    (LANGUAGE_ENGLISH, "English"),
+    (LANGUAGE_ARABIC, "العربية"),
+)
+RTL_LANGUAGES = {LANGUAGE_ARABIC}
+ARABIC_FONT_FAMILY = "Tahoma"
+ARABIC_FONT_FAMILIES = ("Tahoma", "Arial", "Segoe UI", "Dubai", "Microsoft Sans Serif")
+
+
+def _slugify_key(text):
+    slug = re.sub(r"[^a-z0-9]+", "_", str(text or "").strip().lower())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug or "text"
+
+
+TEXT_KEY_ALIASES = {
+    "Dashboard": "nav.dashboard",
+    "Chat": "nav.chat",
+    "Music": "nav.music",
+    "Viewers": "nav.viewers",
+    "Alerts": "nav.alerts",
+    "Twitch": "nav.twitch",
+    "Bot Settings": "nav.bot_settings",
+    "Navigation": "sidebar.navigation",
+    "Live bot control center": "sidebar.tagline",
+    "Bot Account": "account.bot.title",
+    "Channel Account": "account.channel.title",
+    "Connected": "status.connected",
+    "Disconnected": "status.disconnected",
+    "Connecting": "status.connecting",
+    "Not Connected": "status.not_connected",
+    "Not connected": "status.not_connected_sentence",
+    "Token Invalid": "status.token_invalid",
+    "Channel overview": "dashboard.title",
+    "Messages Today": "dashboard.messages_today",
+    "Commands": "dashboard.commands",
+    "Timeouts": "dashboard.timeouts",
+    "Top Chatters": "dashboard.top_chatters",
+    "Twitch Chat Live": "chat.live_title",
+    "Now Playing": "music.now_playing",
+    "Now Playing Preview": "music.now_playing_preview",
+    "Music Controls": "music.controls",
+    "Music Requests: On": "music.requests_on",
+    "Music Requests: Off": "music.requests_off",
+    "Master Volume": "music.master_volume",
+    "Queue": "music.queue",
+    "No queued tracks": "music.no_queued_tracks",
+    "Remove Selected": "music.remove_selected",
+    "Remove from Queue": "music.remove_from_queue",
+    "No track loaded": "music.no_track_loaded",
+    "Thumbnail will appear here": "music.thumbnail_placeholder",
+    "Put a song name or YouTube link": "music.input_placeholder",
+    "Live Log": "log.live",
+    "Bot Status": "bot.status",
+    "Alerts Status": "alerts.status",
+    "Open Twitch Setup": "twitch.open_setup",
+    "Start Bot": "bot.start",
+    "Stop Bot": "bot.stop",
+    "Restart Bot": "bot.restart",
+    "Bot Login": "settings.bot_login",
+    "Channel Login": "settings.channel_login",
+    "Trigger Words": "settings.trigger_words",
+    "No triggers": "settings.no_triggers",
+    "Appearance": "settings.appearance",
+    "Theme": "settings.theme",
+    "Language": "settings.language",
+    "Log Retention": "settings.log_retention",
+    "Updates": "updates.title",
+    "Current Version": "updates.current_version",
+    "Release Channel": "updates.release_channel",
+    "Check for Updates": "updates.check",
+    "Auto Update": "updates.auto_update",
+    "Update checks are prepared but not enabled yet.": "updates.disabled_note",
+    "Auto Update is prepared for future releases and is currently disabled.": "updates.auto_disabled_tooltip",
+    "30 minutes": "settings.log_retention_30",
+    "1 hour": "settings.log_retention_60",
+    "6 hours": "settings.log_retention_360",
+    "24 hours": "settings.log_retention_1440",
+    "English": "language.english",
+    "العربية": "language.arabic",
+    "AI Settings": "settings.ai",
+    "OpenAI API Key": "settings.openai_api_key",
+    "System Prompt": "settings.system_prompt",
+    "Paste Prompt": "settings.paste_prompt",
+    "Reset Prompt": "settings.reset_prompt",
+    "Bot Controls": "settings.bot_controls",
+    "Save Settings": "settings.save",
+    "Send Manual Message as Bot": "settings.manual_message_title",
+    "Send to Chat": "settings.send_to_chat",
+    "Type a message to send directly to chat": "settings.manual_message_placeholder",
+    "View All": "alerts.view_all",
+    "All": "filters.all",
+    "Followers": "alerts.followers",
+    "Follower": "alerts.follower",
+    "Subs": "alerts.subs",
+    "Gifted Subs": "alerts.gifted_subs",
+    "Raids": "alerts.raids",
+    "Bits": "alerts.bits",
+    "Clips": "alerts.clips",
+    "Hype Train": "alerts.hype_train",
+    "Polls": "alerts.polls",
+    "Predictions": "alerts.predictions",
+    "Reward Requests": "alerts.reward_requests",
+    "Shoutouts": "alerts.shoutouts",
+    "Watch Streaks": "alerts.watch_streaks",
+    "Collaboration Requests": "alerts.collaboration_requests",
+    "Alert": "alerts.alert",
+    "Triggered an alert": "alerts.triggered_generic",
+    "Unknown time": "time.unknown",
+    "More actions": "actions.more",
+    "Twitch Setup": "twitch.setup",
+    "Bot Account Login": "twitch.bot_account_login",
+    "Channel Account Login": "twitch.channel_account_login",
+    "Approve access": "twitch.approve_access",
+    "Paste and save this role": "twitch.paste_and_save_role",
+    "Browser Redirect URL": "twitch.redirect_url",
+    "Connected Account": "twitch.connected_account",
+    "Saved Session": "twitch.saved_session",
+    "Paste & Save": "actions.paste_save",
+    "Logout": "actions.logout",
+    "Reconnect": "actions.reconnect",
+    "Refresh Account": "account.refresh",
+    "Reconnect Bot Account": "account.bot.reconnect",
+    "Reconnect Channel Account": "account.channel.reconnect",
+    "Copy Bot Token Path": "account.bot.copy_token_path",
+    "Copy Channel Token Path": "account.channel.copy_token_path",
+    "Logout Bot Account": "account.bot.logout",
+    "Logout Channel Account": "account.channel.logout",
+}
+
+
+ARABIC_TRANSLATIONS = {
+    "Dashboard": "لوحة التحكم",
+    "Chat": "الدردشة",
+    "Music": "الموسيقى",
+    "Viewers": "المشاهدون",
+    "Alerts": "التنبيهات",
+    "Twitch": "تويتش",
+    "Bot Settings": "إعدادات البوت",
+    "Navigation": "التنقل",
+    "Live bot control center": "مركز التحكم المباشر بالبوت",
+    "Bot": "البوت",
+    "Channel": "القناة",
+    "Bot Account": "حساب البوت",
+    "Channel Account": "حساب القناة",
+    "Connected": "متصل",
+    "Disconnected": "غير متصل",
+    "Connecting": "جار الاتصال",
+    "Not Connected": "غير متصل",
+    "Not connected": "غير متصل",
+    "Token Invalid": "الرمز غير صالح",
+    "ONLINE": "متصل",
+    "OFFLINE": "غير متصل",
+    "Ready to start": "جاهز للبدء",
+    "Waiting for activity": "بانتظار النشاط",
+    "Channel overview": "نظرة عامة على القناة",
+    "Good morning": "صباح الخير",
+    "Good afternoon": "مساء الخير",
+    "Good evening": "مساء الخير",
+    "your channel": "قناتك",
+    "Messages Today": "رسائل اليوم",
+    "Commands": "الأوامر",
+    "Timeouts": "المهلات",
+    "Messages": "الرسائل",
+    "Chatter": "المتحدث",
+    "Top Chatters": "أكثر المتحدثين نشاطا",
+    "Twitch Chat Live": "دردشة تويتش المباشرة",
+    "Now Playing": "التشغيل الحالي",
+    "Now Playing Preview": "معاينة التشغيل الحالي",
+    "Music Controls": "تحكم الموسيقى",
+    "Music Requests: On": "طلبات الموسيقى: مفعلة",
+    "Music Requests: Off": "طلبات الموسيقى: متوقفة",
+    "Master Volume": "الصوت الرئيسي",
+    "Queue": "قائمة الانتظار",
+    "No queued tracks": "لا توجد مقاطع في الانتظار",
+    "Remove Selected": "إزالة المحدد",
+    "Remove from Queue": "إزالة من قائمة الانتظار",
+    "Paste": "لصق",
+    "Play": "تشغيل",
+    "Skip": "تخطي",
+    "Stop": "إيقاف",
+    "Mute": "كتم",
+    "Unmute": "إلغاء الكتم",
+    "No track loaded": "لا يوجد مقطع محمل",
+    "Thumbnail will appear here": "ستظهر الصورة المصغرة هنا",
+    "Put a song name or YouTube link": "اكتب اسم أغنية أو رابط يوتيوب",
+    "Live Log": "السجل المباشر",
+    "Bot Status": "حالة البوت",
+    "Alerts Status": "حالة التنبيهات",
+    "Twitch Roles": "أدوار تويتش",
+    "Open Twitch Setup": "فتح إعداد تويتش",
+    "Start Bot": "تشغيل البوت",
+    "Stop Bot": "إيقاف البوت",
+    "Restart Bot": "إعادة تشغيل البوت",
+    "Bot Login": "دخول البوت",
+    "Channel Login": "دخول القناة",
+    "Trigger Words": "كلمات التشغيل",
+    "No triggers": "لا توجد كلمات تشغيل",
+    "Appearance": "المظهر",
+    "Theme": "السمة",
+    "Language": "اللغة",
+    "Log Retention": "مدة حفظ السجل",
+    "30 minutes": "30 دقيقة",
+    "1 hour": "ساعة واحدة",
+    "6 hours": "6 ساعات",
+    "24 hours": "24 ساعة",
+    "English": "English",
+    "العربية": "العربية",
+    "AI Settings": "إعدادات الذكاء الاصطناعي",
+    "OpenAI API Key": "مفتاح OpenAI API",
+    "System Prompt": "تعليمات النظام",
+    "Paste Prompt": "لصق التعليمات",
+    "Reset Prompt": "إعادة ضبط التعليمات",
+    "Bot Controls": "أدوات تحكم البوت",
+    "Save Settings": "حفظ الإعدادات",
+    "Send Manual Message as Bot": "إرسال رسالة يدوية باسم البوت",
+    "Send to Chat": "إرسال للدردشة",
+    "Show": "إظهار",
+    "Hide": "إخفاء",
+    "Bot Setup": "إعداد البوت",
+    "Trigger Input": "إدخال كلمة التشغيل",
+    "App Version": "إصدار التطبيق",
+    "Updates": "التحديثات",
+    "Current Version": "الإصدار الحالي",
+    "Release Channel": "قناة الإصدار",
+    "Check for Updates": "التحقق من التحديثات",
+    "Auto Update": "التحديث التلقائي",
+    "Update checks are prepared but not enabled yet.": "التحقق من التحديثات جاهز لكنه غير مفعل حاليا.",
+    "Auto Update is prepared for future releases and is currently disabled.": "التحديث التلقائي جاهز للإصدارات القادمة وهو معطل حاليا.",
+    "Filter": "التصفية",
+    "Search": "البحث",
+    "View All": "عرض الكل",
+    "Reset Default": "استعادة الافتراضي",
+    "All": "الكل",
+    "Followers": "المتابعون",
+    "Follower": "متابع",
+    "Subs": "الاشتراكات",
+    "Gifted Subs": "الاشتراكات المهداه",
+    "Raids": "الغارات",
+    "Bits": "البتس",
+    "Clips": "المقاطع",
+    "Hype Train": "قطار الحماس",
+    "Polls": "التصويتات",
+    "Predictions": "التوقعات",
+    "Reward Requests": "طلبات المكافآت",
+    "Shoutouts": "الترشيحات",
+    "Watch Streaks": "سلاسل المشاهدة",
+    "Collaboration Requests": "طلبات التعاون",
+    "Alert": "تنبيه",
+    "Triggered an alert": "أطلق تنبيها",
+    "Unknown time": "وقت غير معروف",
+    "More actions": "إجراءات إضافية",
+    "Twitch Setup": "إعداد تويتش",
+    "Bot Account Login": "دخول حساب البوت",
+    "Channel Account Login": "دخول حساب القناة",
+    "Approve access": "الموافقة على الوصول",
+    "Paste and save this role": "الصق واحفظ هذا الدور",
+    "Browser Redirect URL": "رابط التحويل من المتصفح",
+    "Connected Account": "الحساب المتصل",
+    "Saved Session": "الجلسة المحفوظة",
+    "Paste & Save": "لصق وحفظ",
+    "Logout": "تسجيل الخروج",
+    "Reconnect": "إعادة الاتصال",
+    "Advanced: Copy Token File Path": "متقدم: نسخ مسار ملف الرمز",
+    "No token saved on this PC yet.": "لا يوجد رمز محفوظ على هذا الجهاز بعد.",
+    "Viewer Dashboard": "لوحة المشاهدين",
+    "Viewers Dashboard": "لوحة المشاهدين",
+    "Live moderation view": "عرض الإشراف المباشر",
+    "Current Viewers": "المشاهدون الحاليون",
+    "Stream Status": "حالة البث",
+    "Stream Uptime": "مدة البث",
+    "Viewer Directory": "دليل المشاهدين",
+    "Search by username": "البحث باسم المستخدم",
+    "Sort by": "الترتيب حسب",
+    "Newest": "الأحدث",
+    "Oldest": "الأقدم",
+    "Role": "الدور",
+    "Status": "الحالة",
+    "Username": "اسم المستخدم",
+    "Viewer": "مشاهد",
+    "Subscriber": "مشترك",
+    "VIP": "VIP",
+    "Mods": "المشرفون",
+    "Lurkers": "المتابعون بصمت",
+    "Mod": "مشرف",
+    "Broadcaster": "صاحب القناة",
+    "Active": "نشط",
+    "Active now": "نشط الآن",
+    "Lurking": "متابع بصمت",
+    "Muted": "مكتوم",
+    "Waiting": "بانتظار",
+    "Selected Viewer": "المشاهد المحدد",
+    "Select a viewer": "اختر مشاهدا",
+    "Total Messages": "إجمالي الرسائل",
+    "Last Active": "آخر نشاط",
+    "Relative Activity": "النشاط النسبي",
+    "Behavior": "السلوك",
+    "Neutral": "محايد",
+    "Good": "جيد",
+    "Last Message": "آخر رسالة",
+    "Profile Notes": "ملاحظات الملف",
+    "No activity yet": "لا يوجد نشاط بعد",
+    "No recent activity": "لا يوجد نشاط حديث",
+    "No messages yet": "لا توجد رسائل بعد",
+    "Timeout": "مهلة",
+    "Add VIP": "إضافة VIP",
+    "Remove VIP": "إزالة VIP",
+    "Viewer Activity": "نشاط المشاهدين",
+    "Channel Lists": "قوائم القناة",
+    "Hide Lists": "إخفاء القوائم",
+    "Show Lists": "إظهار القوائم",
+    "Unfollowers": "غير المتابعين",
+    "Subscribers": "المشتركون",
+    "Unsubscribers": "غير المشتركين",
+    "Channels Followed": "القنوات المتابعة",
+    "Account": "الحساب",
+    "Details": "التفاصيل",
+    "When": "الوقت",
+    "Refresh Lists": "تحديث القوائم",
+    "Previous": "السابق",
+    "Next": "التالي",
+    "No data yet": "لا توجد بيانات بعد",
+    "Reconnect/sync if needed": "أعد الاتصال أو المزامنة عند الحاجة",
+    "Following": "متابع",
+    "Active": "نشط",
+    "Unfollowed": "ألغى المتابعة",
+    "Account Closed": "الحساب مغلق",
+    "Account Unavailable": "الحساب غير متاح",
+    "Subscription": "اشتراك",
+    "Tier 1": "المستوى 1",
+    "Tier 2": "المستوى 2",
+    "Tier 3": "المستوى 3",
+    "Gift": "هدية",
+    "Offline": "غير مباشر",
+    "Online": "مباشر",
+    "7-Day Activity": "نشاط 7 أيام",
+    "Paste the full Twitch redirect URL first": "الصق رابط تحويل تويتش الكامل أولا",
+    "Alerts: Connected": "التنبيهات: متصلة",
+    "Alerts: Missing permissions": "التنبيهات: صلاحيات ناقصة",
+    "Alerts: Connecting": "التنبيهات: جار الاتصال",
+    "Alerts: Disconnected": "التنبيهات: غير متصلة",
+    "Channel Account not connected": "حساب القناة غير متصل",
+    "Listening for Twitch alert events": "يتم الاستماع لتنبيهات تويتش",
+    "Connecting to Twitch alert events": "جار الاتصال بتنبيهات تويتش",
+    "Alerts listener is not running": "مستمع التنبيهات لا يعمل",
+    "Some Twitch alert permissions are missing": "بعض صلاحيات تنبيهات تويتش ناقصة",
+    "Both accounts connected": "الحسابان متصلان",
+    "Bot online • full system enabled": "البوت يعمل • النظام الكامل مفعل",
+    "Bot online • limited channel access": "البوت يعمل • وصول القناة محدود",
+    "Bot online": "البوت يعمل",
+    "Bot account connected • limited mode": "حساب البوت متصل • وضع محدود",
+    "Channel account connected • bot missing": "حساب القناة متصل • البوت غير متصل",
+    "Bot account connected - limited mode": "حساب البوت متصل - وضع محدود",
+    "Channel account connected - bot missing": "حساب القناة متصل - البوت غير متصل",
+    "Twitch setup needed": "يلزم إعداد تويتش",
+    "BOT + CHANNEL": "البوت + القناة",
+    "BOT ONLY": "البوت فقط",
+    "CHANNEL ONLY": "القناة فقط",
+    "NOT CONNECTED": "غير متصل",
+    "Refresh Account": "تحديث الحساب",
+    "Reconnect Bot Account": "إعادة ربط حساب البوت",
+    "Reconnect Channel Account": "إعادة ربط حساب القناة",
+    "Copy Bot Token Path": "نسخ مسار رمز البوت",
+    "Copy Channel Token Path": "نسخ مسار رمز القناة",
+    "Logout Bot Account": "تسجيل خروج حساب البوت",
+    "Logout Channel Account": "تسجيل خروج حساب القناة",
+    "Twitch connected successfully.": "تم الاتصال بتويتش بنجاح.",
+    "Checking Twitch connection.": "جار فحص اتصال تويتش.",
+    "Validating this Twitch session.": "جار التحقق من جلسة تويتش.",
+    "The saved Twitch token is not valid.": "رمز تويتش المحفوظ غير صالح.",
+    "Reconnect this Twitch role to restore access.": "أعد ربط هذا الدور لاستعادة الوصول.",
+    "Bot account ready": "حساب البوت جاهز",
+    "Channel account ready": "حساب القناة جاهز",
+    "Connect the bot account": "ربط حساب البوت",
+    "Connect the channel account": "ربط حساب القناة",
+    "Browser opened": "تم فتح المتصفح",
+    "Could not open Twitch login": "تعذر فتح تسجيل دخول تويتش",
+    "This role is used for sending chat messages, handling commands, and moderation actions.": "يستخدم هذا الدور لإرسال رسائل الدردشة، وتنفيذ الأوامر، وإجراءات الإشراف.",
+    "This role unlocks broadcaster-level dashboard features, moderation context, analytics, and channel controls.": "يفتح هذا الدور ميزات لوحة التحكم الخاصة بصاحب القناة، وسياق الإشراف، والتحليلات، وأدوات التحكم بالقناة.",
+    "Use the bot account that should speak in chat.": "استخدم حساب البوت الذي سيتحدث في الدردشة.",
+    "Use the streamer/channel account here so advanced channel features stay enabled.": "استخدم حساب صاحب القناة هنا حتى تبقى ميزات القناة المتقدمة مفعلة.",
+    "Log in with the account that will send messages, respond to commands, and perform moderation actions.": "سجل الدخول بالحساب الذي سيرسل الرسائل، ويرد على الأوامر، وينفذ إجراءات الإشراف.",
+    "Log in with the streamer or broadcaster account to unlock analytics, music controls, viewer data, and channel-level features.": "سجل الدخول بحساب صاحب القناة لفتح التحليلات، وتحكم الموسيقى، وبيانات المشاهدين، وميزات القناة.",
+    "Open Twitch in the browser, approve access, then paste the final redirect URL here and save it for this role only.": "افتح تويتش في المتصفح، وافق على الوصول، ثم الصق رابط التحويل النهائي هنا واحفظه لهذا الدور فقط.",
+    "Open Twitch approval in the browser for this specific role.": "افتح موافقة تويتش في المتصفح لهذا الدور تحديدا.",
+    "Twitch redirects to the registered URL after approval. Copy the full final browser URL.": "بعد الموافقة، يحولك تويتش إلى الرابط المسجل. انسخ رابط المتصفح النهائي كاملا.",
+    "Save the token only into Bot Account so sessions never get mixed.": "احفظ الرمز في حساب البوت فقط حتى لا تختلط الجلسات.",
+    "Save the token only into Channel Account so sessions never get mixed.": "احفظ الرمز في حساب القناة فقط حتى لا تختلط الجلسات.",
+    "Used for sending chat messages, handling commands, and moderation actions.": "يستخدم لإرسال رسائل الدردشة، وتنفيذ الأوامر، وإجراءات الإشراف.",
+    "Used for broadcaster-level permissions, dashboard analytics, music control, and channel systems.": "يستخدم لصلاحيات صاحب القناة، وتحليلات اللوحة، وتحكم الموسيقى، وأنظمة القناة.",
+    "Connect the dedicated bot account here. Even if you use the same Twitch account for both roles, the app stores this login separately as the bot session.": "اربط حساب البوت المخصص هنا. حتى لو استخدمت حساب تويتش نفسه للدورين، سيحفظ التطبيق هذا الدخول كجلسة بوت مستقلة.",
+    "Connect the streamer or channel owner account here so dashboard features can use the broader broadcaster and moderation scopes independently from the bot session.": "اربط حساب صاحب القناة هنا حتى تستخدم ميزات اللوحة صلاحيات البث والإشراف بشكل مستقل عن جلسة البوت.",
+    "This page is only for Twitch connection and account authorization. Use Bot Settings for bot login, channel login, triggers, and the rest of the bot configuration.": "هذه الصفحة مخصصة لاتصال تويتش وتفويض الحساب فقط. استخدم إعدادات البوت لدخول البوت والقناة وكلمات التشغيل وبقية إعدادات البوت.",
+    "Bot Account: sends chat messages, runs commands, and performs moderation actions.\nChannel Account: unlocks broadcaster-level dashboard access, analytics, music control, and channel context.\nIf both are connected, the full system is enabled.": "حساب البوت: يرسل رسائل الدردشة، ويشغل الأوامر، وينفذ إجراءات الإشراف.\nحساب القناة: يفتح وصول لوحة التحكم لصاحب القناة، والتحليلات، وتحكم الموسيقى، وسياق القناة.\nعند ربط الحسابين، يعمل النظام بالكامل.",
+    "Core bot status, Twitch readiness, and quick runtime controls.": "حالة البوت الأساسية، وجاهزية تويتش، وأدوات تشغيل سريعة.",
+    "Connect Channel Account to enable live alerts": "اربط حساب القناة لتفعيل التنبيهات المباشرة",
+    "Connect both Twitch roles in Twitch Setup": "اربط دوري تويتش من إعداد تويتش",
+    "Connect Bot Account and Channel Account separately in Twitch Setup.": "اربط حساب البوت وحساب القناة بشكل منفصل من إعداد تويتش.",
+    "Choose a full app theme. The new look applies instantly across the sidebar, cards, charts, inputs, and buttons.": "اختر سمة التطبيق الكاملة. يطبق المظهر فورا على الشريط الجانبي والبطاقات والرسوم والحقول والأزرار.",
+    "Type a message to send directly to chat": "اكتب رسالة لإرسالها مباشرة إلى الدردشة",
+    "Installer and desktop build read from the shared version file.": "المثبت ونسخة سطح المكتب يقرآن من ملف الإصدار المشترك.",
+    "A cleaner live snapshot of messages, commands, timeouts, and playback activity.": "لقطة مباشرة أوضح للرسائل والأوامر والمهلات ونشاط التشغيل.",
+    "Here is a cleaner 7-day overview of messages, commands, timeouts, and live activity.": "هذه نظرة أوضح لآخر 7 أيام من الرسائل والأوامر والمهلات والنشاط المباشر.",
+    "Waiting for your first activity pulse": "بانتظار أول نشاط من القناة",
+    "Most active chatters in the current dashboard snapshot.": "أكثر المتحدثين نشاطا في لقطة اللوحة الحالية.",
+    "Latest Twitch activity feed events.": "أحدث أحداث نشاط تويتش.",
+    "Recent chat activity rendered with badges, emotes, and mentions.": "نشاط الدردشة الحديث مع الشارات والإيموتات والإشارات.",
+    "Backend activity, command flow, and playback events appear here in real time.": "تظهر هنا أنشطة الخلفية وتدفق الأوامر وأحداث التشغيل مباشرة.",
+    "A Twitch-style activity feed for follows, raids, subscriptions, bits, and other recent channel events.": "موجز نشاط بأسلوب تويتش للمتابعات والغارات والاشتراكات والبتس وبقية أحداث القناة الحديثة.",
+    "No recent Twitch alerts captured yet": "لم يتم التقاط أي تنبيهات تويتش حديثة بعد",
+    "No stored Twitch alert events captured yet": "لم يتم التقاط أي أحداث تنبيه تويتش محفوظة بعد",
+    "No alerts match the current filter": "لا توجد تنبيهات تطابق التصفية الحالية",
+    "No recent follower alerts captured yet": "لا توجد تنبيهات متابعة حديثة بعد",
+    "No recent subscription alerts captured yet": "لا توجد تنبيهات اشتراك حديثة بعد",
+    "No recent raid alerts captured yet": "لا توجد تنبيهات غارة حديثة بعد",
+    "Not currently available via Twitch API/EventSub": "غير متاح حاليا عبر Twitch API/EventSub",
+    "No recent alerts captured yet": "لا توجد تنبيهات حديثة بعد",
+    "Connect Channel Account to enable Twitch alert EventSub subscriptions": "اربط حساب القناة لتفعيل اشتراكات تنبيهات EventSub من تويتش",
+    "Track your live audience with searchable viewer profiles, moderation shortcuts, and chatter analytics.": "تابع جمهورك المباشر عبر ملفات مشاهدين قابلة للبحث، واختصارات إشراف، وتحليلات للدردشة.",
+    "Search viewers, filter by role or activity, and click a row to inspect the profile panel.": "ابحث في المشاهدين، وصف حسب الدور أو النشاط، واضغط على أي صف لمراجعة لوحة الملف.",
+    "Inspect message volume, recent activity, and moderation tags for the currently selected chatter.": "راجع حجم الرسائل والنشاط الحديث وعلامات الإشراف للمتحدث المحدد.",
+    "A quick view of recent message, command, and timeout volume over the last 7 days.": "عرض سريع لحجم الرسائل والأوامر والمهلات خلال آخر 7 أيام.",
+    "Switch between followers, unfollowers, subscribers, unsubscribers, and channels followed. These lists sync from Twitch and track removals locally over time.": "تنقل بين المتابعين وغير المتابعين والمشتركين وغير المشتركين والقنوات المتابعة. تتم مزامنة هذه القوائم من تويتش وتتبع الإزالات محليا مع الوقت.",
+    "Your most active chatters in the current snapshot, useful for quick moderation triage.": "أكثر المتحدثين نشاطا في اللقطة الحالية، مفيد لمراجعة الإشراف بسرعة.",
+    "Select a viewer from the left to inspect their recent activity.": "اختر مشاهدا من اليسار لمراجعة نشاطه الحديث.",
+    "not enough information yet": "لا توجد معلومات كافية بعد",
+    "No viewers matched your search": "لا يوجد مشاهدون مطابقون للبحث",
+    "No chatter data yet": "لا توجد بيانات دردشة بعد",
+    "No chatters yet": "لا يوجد متحدثون بعد",
+    "No live stream detected right now": "لا يوجد بث مباشر حاليا",
+    "Stream is live right now": "البث مباشر الآن",
+    "Time since stream start": "الوقت منذ بداية البث",
+    "Syncing Twitch relationship lists...": "جار مزامنة قوائم علاقات تويتش...",
+    "No relationship sync yet": "لا توجد مزامنة علاقات بعد",
+    "EventSub disconnected": "EventSub غير متصل",
+    "EventSub connected": "EventSub متصل",
+    "Start the bot to sync followers, subscribers, and followed channels.": "شغل البوت لمزامنة المتابعين والمشتركين والقنوات المتابعة.",
+    "Saved at": "حفظ في",
+    "granted scopes": "صلاحيات ممنوحة",
+    "Blue": "الأزرق",
+    "Pink": "الوردي",
+    "Purple": "البنفسجي",
+    "Dark": "الداكن",
+    "Falcon Neon": "فالكون نيون",
+    "Followed you": "تابعك",
+    "followers": "متابعين",
+    "subscriptions": "اشتراكات",
+    "subscribers": "مشتركين",
+    "followed channels": "القنوات المتابعة",
+    "raids": "غارات",
+    "bits": "بتس",
+    "reward requests": "طلبات مكافآت",
+    "polls": "تصويتات",
+    "predictions": "توقعات",
+}
+
+
+def normalize_language(language):
+    language = str(language or DEFAULT_LANGUAGE).strip().lower()
+    if language in {LANGUAGE_ARABIC, "arabic", "ar-sa", "ar_sa"}:
+        return LANGUAGE_ARABIC
+    return LANGUAGE_ENGLISH
+
+
+def is_rtl_language(language):
+    return normalize_language(language) in RTL_LANGUAGES
+
+
+def contains_arabic(text):
+    return bool(re.search(r"[\u0600-\u06ff]", str(text or "")))
+
+
+def _legacy_translate_embedded_terms_disabled(text, language):
+    if normalize_language(language) != LANGUAGE_ARABIC:
+        return text
+    translated = str(text)
+    for english in sorted(ARABIC_TRANSLATIONS, key=len, reverse=True):
+        arabic = ARABIC_TRANSLATIONS[english]
+        translated = re.sub(rf"\b{re.escape(english)}\b", arabic, translated)
+    return translated
+
+
+def _legacy_translate_text_patterns_disabled(text, language=DEFAULT_LANGUAGE):
+    if text is None:
+        return ""
+    source = str(text)
+    language = normalize_language(language)
+    if language != LANGUAGE_ARABIC:
+        return source
+
+    source = source.replace("Ã¢â‚¬Â¢", "•").replace("â€¢", "•")
+    if source in ARABIC_TRANSLATIONS:
+        return ARABIC_TRANSLATIONS[source]
+
+    patterns = (
+        (r"^Good morning, (.+)$", lambda m: f"صباح الخير، {m.group(1)}"),
+        (r"^Good afternoon, (.+)$", lambda m: f"مساء الخير، {m.group(1)}"),
+        (r"^Good evening, (.+)$", lambda m: f"مساء الخير، {m.group(1)}"),
+        (r"^7-day total: ([\d,]+)$", lambda m: f"إجمالي 7 أيام: {m.group(1)}"),
+        (r"^Updated (.+)$", lambda m: f"تم التحديث {m.group(1)}"),
+        (r"^Latest ([\d,]+) alerts$", lambda m: f"آخر {m.group(1)} تنبيهات"),
+        (r"^Latest ([\d,]+) (.+)$", lambda m: f"آخر {m.group(1)} من {_translate_embedded_terms(m.group(2), language)}"),
+        (r"^Page ([\d,]+) / ([\d,]+)$", lambda m: f"صفحة {m.group(1)} / {m.group(2)}"),
+        (r"^Page ([\d,]+) / ([\d,]+) - ([\d,]+) results$", lambda m: f"صفحة {m.group(1)} / {m.group(2)} - {m.group(3)} نتيجة"),
+        (r"^Showing 0 viewers$", lambda m: "عرض 0 مشاهد"),
+        (r"^Showing 0 of ([\d,]+) tracked viewers$", lambda m: f"عرض 0 من {m.group(1)} مشاهدين متتبعين"),
+        (
+            r"^Showing ([\d,]+) users on page ([\d,]+) of ([\d,]+) - ([\d,]+) matching viewers from ([\d,]+) tracked accounts$",
+            lambda m: f"عرض {m.group(1)} مستخدمين في الصفحة {m.group(2)} من {m.group(3)} - {m.group(4)} مطابقين من {m.group(5)} حسابات متتبعة",
+        ),
+        (r"^Loading (.+) from Twitch\.\.\.$", lambda m: f"جار تحميل {_translate_embedded_terms(m.group(1), language)} من تويتش..."),
+        (
+            r"^Showing page ([\d,]+) of ([\d,]+) - ([\d,]+) total (.+) - Start the bot to sync followers, subscribers, and followed channels\.$",
+            lambda m: f"عرض الصفحة {m.group(1)} من {m.group(2)} - الإجمالي {m.group(3)} {_translate_embedded_terms(m.group(4), language)} - شغل البوت لمزامنة المتابعين والمشتركين والقنوات المتابعة.",
+        ),
+        (r"^Showing page ([\d,]+) of ([\d,]+) - ([\d,]+) total (?!.* - Last synced )(.+)$", lambda m: f"عرض الصفحة {m.group(1)} من {m.group(2)} - الإجمالي {m.group(3)} {_translate_embedded_terms(m.group(4), language)}"),
+        (r"^No (.+) data yet$", lambda m: f"لا توجد بيانات {_translate_embedded_terms(m.group(1), language)} بعد"),
+        (r"^Last synced (.+)$", lambda m: f"آخر مزامنة {m.group(1)}"),
+        (r"^Tracked viewers: ([\d,]+)$", lambda m: f"المشاهدون المتتبعون: {m.group(1)}"),
+        (r"^Active chatters: ([\d,]+)$", lambda m: f"المتحدثون النشطون: {m.group(1)}"),
+        (r"^Live viewers for (.+)$", lambda m: f"المشاهدون المباشرون لـ {m.group(1)}"),
+        (r"^(\d+)m ago$", lambda m: f"قبل {m.group(1)} د"),
+        (r"^(\d+)h ago$", lambda m: f"قبل {m.group(1)} س"),
+        (r"^(\d+)d ago$", lambda m: f"قبل {m.group(1)} يوم"),
+        (r"^(\d+) days ago$", lambda m: f"قبل {m.group(1)} يوم"),
+        (r"^(\d+) hours ago$", lambda m: f"قبل {m.group(1)} ساعة"),
+        (r"^(\d+) minutes ago$", lambda m: f"قبل {m.group(1)} دقيقة"),
+        (r"^(.+) • (\d+) days ago$", lambda m: f"{_translate_embedded_terms(m.group(1), language)} • قبل {m.group(2)} يوم"),
+        (r"^(.+) • (\d+) hours ago$", lambda m: f"{_translate_embedded_terms(m.group(1), language)} • قبل {m.group(2)} ساعة"),
+        (r"^(.+) • (\d+) minutes ago$", lambda m: f"{_translate_embedded_terms(m.group(1), language)} • قبل {m.group(2)} دقيقة"),
+        (r"^(\d+)h (\d+)m$", lambda m: f"{m.group(1)} س {m.group(2)} د"),
+        (r"^(\d+)m$", lambda m: f"{m.group(1)} د"),
+        (r"^Connect (.+)$", lambda m: f"ربط {_translate_embedded_terms(m.group(1), language)}"),
+        (r"^Reconnect (.+)$", lambda m: f"إعادة ربط {_translate_embedded_terms(m.group(1), language)}"),
+        (r"^(.+) connected$", lambda m: f"{_translate_embedded_terms(m.group(1), language)} متصل"),
+        (r"^(.+): connected$", lambda m: f"{_translate_embedded_terms(m.group(1), language)}: متصل"),
+        (r"^(.+): checking connection$", lambda m: f"{_translate_embedded_terms(m.group(1), language)}: جار فحص الاتصال"),
+        (r"^(.+): disconnected$", lambda m: f"{_translate_embedded_terms(m.group(1), language)}: غير متصل"),
+        (r"^(.+) checking connection$", lambda m: f"{_translate_embedded_terms(m.group(1), language)} جار فحص الاتصال"),
+        (r"^Checking Twitch token Last saved as (.+)\.$", lambda m: f"جار فحص رمز تويتش. آخر حفظ باسم {m.group(1)}."),
+        (r"^Listening to ([\d,]+) alert event types$", lambda m: f"يستمع إلى {m.group(1)} أنواع من التنبيهات"),
+        (r"^Alerts: Connected\. (.+)$", lambda m: f"التنبيهات: متصلة. {translate_text(m.group(1), language)}"),
+        (r"^Alerts: Connecting\. (.+)$", lambda m: f"التنبيهات: جار الاتصال. {translate_text(m.group(1), language)}"),
+        (r"^Alerts: Disconnected\. (.+)$", lambda m: f"التنبيهات: غير متصلة. {translate_text(m.group(1), language)}"),
+        (r"^Redeemed (.+)$", lambda m: f"استرد {m.group(1)}"),
+        (
+            r"^Showing page ([\d,]+) of ([\d,]+) - ([\d,]+) total (.+) - Last synced (.+)$",
+            lambda m: f"عرض الصفحة {m.group(1)} من {m.group(2)} - الإجمالي {m.group(3)} {_translate_embedded_terms(m.group(4), language)} - آخر مزامنة {m.group(5)}",
+        ),
+        (r"^Required scopes: (.+)$", lambda m: f"الصلاحيات المطلوبة: {m.group(1)}"),
+        (r"^Registered Twitch redirect URL: (.+)$", lambda m: f"رابط تحويل تويتش المسجل: {m.group(1)}"),
+        (r"^Paste the full Twitch redirect URL for (.+)$", lambda m: f"الصق رابط تحويل تويتش الكامل لـ {_translate_embedded_terms(m.group(1), language)}"),
+        (r"^Saved token: (.+)$", lambda m: f"رمز محفوظ: {_translate_embedded_terms(m.group(1), language)}"),
+        (r"^(.+) granted scopes$", lambda m: f"{m.group(1)} صلاحيات ممنوحة"),
+        (r"^(.+) • (.+)$", lambda m: f"{_translate_embedded_terms(m.group(1), language)} • {_translate_embedded_terms(m.group(2), language)}"),
+    )
+    for pattern, renderer in patterns:
+        match = re.match(pattern, source)
+        if match:
+            return renderer(match)
+    return _translate_embedded_terms(source, language)
+
+
+# Keyed localization resources.
+#
+# The legacy text map above is kept only as prepared copy. The active lookup path
+# below resolves UI keys to predefined strings and never performs regex or
+# widget-content translation work at runtime.
+for _english_text in ARABIC_TRANSLATIONS:
+    TEXT_KEY_ALIASES.setdefault(_english_text, f"legacy.{_slugify_key(_english_text)}")
+
+
+LOCALIZED_STRINGS = {
+    LANGUAGE_ENGLISH: {},
+    LANGUAGE_ARABIC: {},
+}
+
+for _english_text, _key in TEXT_KEY_ALIASES.items():
+    LOCALIZED_STRINGS[LANGUAGE_ENGLISH].setdefault(_key, _english_text)
+    LOCALIZED_STRINGS[LANGUAGE_ARABIC].setdefault(_key, ARABIC_TRANSLATIONS.get(_english_text, _english_text))
+
+LOCALIZED_STRINGS[LANGUAGE_ENGLISH].update(
+    {
+        "language.english": "English",
+        "language.arabic": "Arabic",
+        "dashboard.greeting": "{greeting}, {channel}",
+        "dashboard.seven_day_total": "7-day total: {total}",
+        "dashboard.updated": "Updated {time}",
+        "alerts.latest_count": "Latest {count} alerts",
+        "alerts.latest_type_count": "Latest {count} {alert_type}",
+        "alerts.meta": "{alert_type} - {time_ago}",
+        "alerts.connected_detail": "Alerts: Connected. {detail}",
+        "alerts.connecting_detail": "Alerts: Connecting. {detail}",
+        "alerts.disconnected_detail": "Alerts: Disconnected. {detail}",
+        "pagination.page": "Page {page} / {total_pages}",
+        "pagination.page_results": "Page {page} / {total_pages} - {results} results",
+        "viewers.showing_zero": "Showing 0 viewers",
+        "viewers.showing_zero_tracked": "Showing 0 of {tracked_viewers} tracked viewers",
+        "viewers.showing_page": "Showing {rows} users on page {page} of {total_pages} - {matches} matching viewers from {tracked_viewers} tracked accounts",
+        "viewers.live_for": "Live viewers for {channel}",
+        "viewers.tracked_count": "Tracked viewers: {count}",
+        "viewers.active_chatters_count": "Active chatters: {count}",
+        "relationships.loading": "Loading {category} from Twitch...",
+        "relationships.showing_page": "Showing page {page} of {total_pages} - {total} total {category}",
+        "relationships.showing_page_synced": "Showing page {page} of {total_pages} - {total} total {category} - Last synced {time}",
+        "relationships.showing_page_bot_needed": "Showing page {page} of {total_pages} - {total} total {category} - Start the bot to sync followers, subscribers, and followed channels.",
+        "relationships.no_data": "No {category} data yet",
+        "relationships.last_synced": "Last synced {time}",
+        "time.minutes_short": "{count}m",
+        "time.hours_minutes_short": "{hours}h {minutes}m",
+        "time.minutes_ago": "{count} minutes ago",
+        "time.hours_ago": "{count} hours ago",
+        "time.days_ago": "{count} days ago",
+        "time.minutes_ago_short": "{count}m ago",
+        "time.hours_ago_short": "{count}h ago",
+        "time.days_ago_short": "{count}d ago",
+        "time.just_now": "just now",
+        "time.yesterday": "yesterday",
+        "twitch.connect_role": "Connect {role}",
+        "twitch.reconnect_role": "Reconnect {role}",
+        "twitch.role_connected": "{role} connected",
+        "twitch.role_tooltip_connected": "{role}: connected",
+        "twitch.role_tooltip_checking": "{role}: checking connection",
+        "twitch.role_tooltip_disconnected": "{role}: disconnected",
+        "twitch.role_checking_connection": "{role} checking connection",
+        "twitch.checking_token_saved_as": "Checking Twitch token. Last saved as {login}.",
+        "twitch.required_scopes": "Required scopes: {scopes}",
+        "twitch.redirect_registered": "Registered Twitch redirect URL: {url}",
+        "twitch.paste_redirect_for_role": "Paste the full Twitch redirect URL for {role}",
+        "twitch.saved_token": "Saved token: {role}",
+        "twitch.granted_scopes": "{count} granted scopes",
+        "alerts.listening_event_types": "Listening to {count} alert event types",
+        "alerts.redeemed_reward": "Redeemed {reward}",
+        "filters.category_count": "{category} ({count})",
+        "updates.current_version_value": "Current Version: {version}",
+        "updates.config_summary": "Provider: {provider} - Channel: {channel} - update_url will be connected in a future release.",
+    }
+)
+
+LOCALIZED_STRINGS[LANGUAGE_ARABIC].update(
+    {
+        "language.english": "English",
+        "language.arabic": "العربية",
+        "dashboard.greeting": "{greeting}، {channel}",
+        "dashboard.seven_day_total": "إجمالي 7 أيام: {total}",
+        "dashboard.updated": "تم التحديث {time}",
+        "alerts.latest_count": "آخر {count} تنبيهات",
+        "alerts.latest_type_count": "آخر {count} من {alert_type}",
+        "alerts.meta": "{alert_type} - {time_ago}",
+        "alerts.connected_detail": "التنبيهات: متصلة. {detail}",
+        "alerts.connecting_detail": "التنبيهات: جار الاتصال. {detail}",
+        "alerts.disconnected_detail": "التنبيهات: غير متصلة. {detail}",
+        "pagination.page": "صفحة {page} / {total_pages}",
+        "pagination.page_results": "صفحة {page} / {total_pages} - {results} نتيجة",
+        "viewers.showing_zero": "عرض 0 مشاهد",
+        "viewers.showing_zero_tracked": "عرض 0 من {tracked_viewers} مشاهدين متتبعين",
+        "viewers.showing_page": "عرض {rows} مستخدمين في الصفحة {page} من {total_pages} - {matches} مطابقين من {tracked_viewers} حسابات متتبعة",
+        "viewers.live_for": "المشاهدون المباشرون لـ {channel}",
+        "viewers.tracked_count": "المشاهدون المتتبعون: {count}",
+        "viewers.active_chatters_count": "المتحدثون النشطون: {count}",
+        "relationships.loading": "جار تحميل {category} من تويتش...",
+        "relationships.showing_page": "عرض الصفحة {page} من {total_pages} - الإجمالي {total} {category}",
+        "relationships.showing_page_synced": "عرض الصفحة {page} من {total_pages} - الإجمالي {total} {category} - آخر مزامنة {time}",
+        "relationships.showing_page_bot_needed": "عرض الصفحة {page} من {total_pages} - الإجمالي {total} {category} - شغل البوت لمزامنة المتابعين والمشتركين والقنوات المتابعة.",
+        "relationships.no_data": "لا توجد بيانات {category} بعد",
+        "relationships.last_synced": "آخر مزامنة {time}",
+        "time.minutes_short": "{count}د",
+        "time.hours_minutes_short": "{hours}س {minutes}د",
+        "time.minutes_ago": "قبل {count} دقيقة",
+        "time.hours_ago": "قبل {count} ساعة",
+        "time.days_ago": "قبل {count} يوم",
+        "time.minutes_ago_short": "قبل {count} د",
+        "time.hours_ago_short": "قبل {count} س",
+        "time.days_ago_short": "قبل {count} يوم",
+        "time.just_now": "الآن",
+        "time.yesterday": "أمس",
+        "twitch.connect_role": "ربط {role}",
+        "twitch.reconnect_role": "إعادة ربط {role}",
+        "twitch.role_connected": "{role} متصل",
+        "twitch.role_tooltip_connected": "{role}: متصل",
+        "twitch.role_tooltip_checking": "{role}: جار فحص الاتصال",
+        "twitch.role_tooltip_disconnected": "{role}: غير متصل",
+        "twitch.role_checking_connection": "{role} جار فحص الاتصال",
+        "twitch.checking_token_saved_as": "جار فحص رمز تويتش. آخر حفظ باسم {login}.",
+        "twitch.required_scopes": "الصلاحيات المطلوبة: {scopes}",
+        "twitch.redirect_registered": "رابط تحويل تويتش المسجل: {url}",
+        "twitch.paste_redirect_for_role": "الصق رابط تحويل تويتش الكامل لـ {role}",
+        "twitch.saved_token": "رمز محفوظ: {role}",
+        "twitch.granted_scopes": "{count} صلاحيات ممنوحة",
+        "alerts.listening_event_types": "يستمع إلى {count} أنواع من التنبيهات",
+        "alerts.redeemed_reward": "استرد {reward}",
+        "filters.category_count": "{category} ({count})",
+        "updates.current_version_value": "الإصدار الحالي: {version}",
+        "updates.config_summary": "الموفر: {provider} - القناة: {channel} - سيتم ربط update_url في إصدار لاحق.",
+    }
+)
+
+AVAILABLE_LANGUAGES = tuple(LOCALIZED_STRINGS.keys())
+
+
+def resolve_text_key(key_or_text):
+    source = "" if key_or_text is None else str(key_or_text)
+    if source in LOCALIZED_STRINGS[LANGUAGE_ENGLISH]:
+        return source
+    return TEXT_KEY_ALIASES.get(source)
+
+
+def has_translation(key_or_text):
+    return resolve_text_key(key_or_text) is not None
+
+
+def translate_text(key_or_text, language=DEFAULT_LANGUAGE):
+    if key_or_text is None:
+        return ""
+    language = normalize_language(language)
+    raw_source = str(key_or_text)
+    key = resolve_text_key(raw_source)
+    if not key:
+        source = (
+            raw_source.replace("ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢", "-")
+            .replace("Ã¢â‚¬Â¢", "-")
+            .replace("â€¢", "-")
+            .replace("•", "-")
+        )
+        key = resolve_text_key(source)
+    if not key:
+        return raw_source
+    return LOCALIZED_STRINGS.get(language, LOCALIZED_STRINGS[DEFAULT_LANGUAGE]).get(
+        key,
+        LOCALIZED_STRINGS[DEFAULT_LANGUAGE].get(key, raw_source),
+    )
+
+
+def format_text(key_or_text, language=DEFAULT_LANGUAGE, **params):
+    template = translate_text(key_or_text, language)
+    try:
+        return template.format(**params)
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
+def language_display_name(language, display_language=None):
+    language = normalize_language(language)
+    display_language = normalize_language(display_language or language)
+    key = "language.arabic" if language == LANGUAGE_ARABIC else "language.english"
+    return translate_text(key, display_language)
