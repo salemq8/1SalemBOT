@@ -1,0 +1,94 @@
+param(
+    [string]$Owner = "salemq8",
+    [string]$Repo = "1SalemBOT",
+    [switch]$SkipRemote
+)
+
+$ErrorActionPreference = "Stop"
+
+$ProjectPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+$VersionFilePath = Join-Path $ProjectPath "VERSION"
+if (-not (Test-Path -LiteralPath $VersionFilePath)) {
+    throw "VERSION file not found at $VersionFilePath"
+}
+
+$AppVersion = (Get-Content -LiteralPath $VersionFilePath -Raw).Trim()
+if (-not $AppVersion) {
+    throw "VERSION file is empty"
+}
+
+$ReleaseRoot = Join-Path $ProjectPath "shareable"
+$InstallerAssetName = "1SalemBOT_Setup_v$AppVersion.exe"
+$PortableAssetName = "1SalemBOT_Portable_v$AppVersion.zip"
+$VersionJsonAssetName = "version.json"
+$InstallerPath = Join-Path $ReleaseRoot $InstallerAssetName
+$PortableZipPath = Join-Path $ReleaseRoot $PortableAssetName
+$VersionJsonPath = Join-Path $ReleaseRoot $VersionJsonAssetName
+$UpdateUrl = "https://github.com/$Owner/$Repo/releases/latest/download/version.json"
+
+$localRequiredFiles = @($InstallerPath, $PortableZipPath, $VersionJsonPath)
+foreach ($path in $localRequiredFiles) {
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "Local release artifact missing: $path"
+    }
+}
+
+$versionJson = Get-Content -LiteralPath $VersionJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($field in @("version", "installer_url", "portable_url", "release_notes")) {
+    if (-not $versionJson.PSObject.Properties.Name.Contains($field)) {
+        throw "version.json missing required field: $field"
+    }
+}
+if ($versionJson.version -ne $AppVersion) {
+    throw "version.json version '$($versionJson.version)' does not match VERSION '$AppVersion'"
+}
+if ($versionJson.installer_url -ne "https://github.com/$Owner/$Repo/releases/latest/download/$InstallerAssetName") {
+    throw "version.json installer_url is not the expected GitHub latest-download URL"
+}
+if ($versionJson.portable_url -ne "https://github.com/$Owner/$Repo/releases/latest/download/$PortableAssetName") {
+    throw "version.json portable_url is not the expected GitHub latest-download URL"
+}
+if (-not $versionJson.release_notes -or $versionJson.release_notes.Count -lt 1) {
+    throw "version.json release_notes is empty"
+}
+
+Write-Host "Local release artifact validation passed."
+
+if ($SkipRemote) {
+    Write-Host "Remote GitHub release validation skipped."
+    exit 0
+}
+
+$headers = @{
+    "User-Agent" = "1SalemBOT-release-validator"
+    "Accept" = "application/vnd.github+json"
+}
+$latestReleaseUrl = "https://api.github.com/repos/$Owner/$Repo/releases/latest"
+try {
+    $latestRelease = Invoke-RestMethod -Uri $latestReleaseUrl -Headers $headers -Method Get
+} catch {
+    throw "Could not read latest GitHub release from $latestReleaseUrl. $($_.Exception.Message)"
+}
+
+$assetNames = @($latestRelease.assets | ForEach-Object { $_.name })
+foreach ($assetName in @($VersionJsonAssetName, $InstallerAssetName, $PortableAssetName)) {
+    if ($assetNames -notcontains $assetName) {
+        throw "Latest GitHub release is missing required asset: $assetName"
+    }
+}
+
+try {
+    $remoteVersionJson = Invoke-RestMethod -Uri $UpdateUrl -Headers @{ "User-Agent" = "1SalemBOT-release-validator" } -Method Get
+} catch {
+    throw "Could not download remote version.json from $UpdateUrl. $($_.Exception.Message)"
+}
+foreach ($field in @("version", "installer_url", "portable_url", "release_notes")) {
+    if (-not $remoteVersionJson.PSObject.Properties.Name.Contains($field)) {
+        throw "Remote version.json missing required field: $field"
+    }
+}
+if ($remoteVersionJson.version -ne $AppVersion) {
+    throw "Remote version.json version '$($remoteVersionJson.version)' does not match local VERSION '$AppVersion'"
+}
+
+Write-Host "Remote GitHub latest release validation passed."

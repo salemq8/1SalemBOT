@@ -1,6 +1,7 @@
 import json
 import shutil
 from datetime import date, timedelta
+from pathlib import Path
 
 from .app_paths import (
     APP_STORAGE_DIR,
@@ -94,7 +95,7 @@ def default_settings():
         "channel_login": "",
         "triggers": DEFAULT_TRIGGERS,
         "theme": "blue",
-        "viewer_sort": "newest",
+        "viewer_sort": "messages",
         "relationship_sort": "newest",
         "alert_feed_filter": DEFAULT_ALERT_FEED_FILTER,
         "log_retention_minutes": 60,

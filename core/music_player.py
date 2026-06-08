@@ -4,7 +4,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
 
 import requests
 import vlc
@@ -12,6 +11,7 @@ import yt_dlp
 from PIL import Image
 
 from .app_paths import APP_NAME, PROJECT_ROOT, WINDOW_ICON_ICO
+from .music_metadata import clean_youtube_watch_url, metadata_channel
 from .ui.constants import APP_VERSION
 
 try:
@@ -57,6 +57,7 @@ class TrackInfo:
     webpage_url: str
     audio_url: str
     thumbnail_url: str
+    channel_name: str = ""
 
 
 class MusicPlayer:
@@ -173,13 +174,7 @@ class MusicPlayer:
         }
 
     def _clean_youtube_url(self, url: str) -> str:
-        url = url.strip()
-        if "youtube.com/watch" not in url:
-            return url
-
-        parsed = urlparse(url)
-        video_id = parse_qs(parsed.query).get("v", [""])[0]
-        return f"https://www.youtube.com/watch?v={video_id}" if video_id else url
+        return clean_youtube_watch_url(url)
 
     def _extract_info(self, query_or_url: str) -> TrackInfo:
         ydl_opts = {
@@ -214,6 +209,7 @@ class MusicPlayer:
             webpage_url=info.get("webpage_url", clean_value),
             audio_url=audio_url,
             thumbnail_url=info.get("thumbnail") or "",
+            channel_name=metadata_channel(info),
         )
 
     def load(self, query_or_url: str) -> TrackInfo:

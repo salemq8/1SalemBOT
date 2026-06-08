@@ -101,27 +101,66 @@ class DashboardViewersMixin:
         if hours:
             return f"{hours}h {minutes}m"
         return f"{minutes}m"
+    def badge_role_key(self, badge):
+        if isinstance(badge, dict):
+            parts = [
+                badge.get("set_id", ""),
+                badge.get("id", ""),
+                badge.get("info", ""),
+                badge.get("title", ""),
+                badge.get("name", ""),
+            ]
+        else:
+            parts = [badge]
+        normalized = []
+        for part in parts:
+            value = str(part or "").strip().lower().replace("_", "-")
+            if value:
+                normalized.append(value)
+        return " ".join(normalized)
+
     def derive_badge_role(self, badges):
         role_priority = {
-            "broadcaster": ("Broadcaster", 4),
-            "moderator": ("Mod", 3),
-            "vip": ("VIP", 2),
+            "broadcaster": ("Broadcaster", 6),
+            "owner": ("Owner", 6),
+            "lead-moderator": ("Lead Moderator", 5),
+            "leadmod": ("Lead Moderator", 5),
+            "lead-mod": ("Lead Moderator", 5),
+            "lead moderator": ("Lead Moderator", 5),
+            "moderator": ("Mod", 4),
+            "mod": ("Mod", 4),
+            "vip": ("VIP", 3),
+            "bot": ("Bot", 2),
             "subscriber": ("Subscriber", 1),
             "founder": ("Subscriber", 1),
         }
         best_role = ("Viewer", 0)
         for badge in badges or []:
             if isinstance(badge, dict):
-                badge_key = (badge.get("set_id") or "").strip().lower()
+                badge_key = (badge.get("set_id") or "").strip().lower().replace("_", "-")
             else:
-                badge_key = str(badge).strip().lower()
-            candidate = role_priority.get(badge_key)
+                badge_key = str(badge).strip().lower().replace("_", "-")
+            searchable_badge = self.badge_role_key(badge)
+            if "lead" in searchable_badge and ("moderator" in searchable_badge or "mod" in searchable_badge):
+                candidate = ("Lead Moderator", 5)
+            else:
+                candidate = role_priority.get(badge_key)
             if candidate and candidate[1] > best_role[1]:
                 best_role = candidate
         return best_role[0]
     def build_viewer_role_lookup(self):
         role_lookup = {}
-        role_priority = {"Viewer": 0, "Subscriber": 1, "VIP": 2, "Mod": 3, "Broadcaster": 4}
+        role_priority = {
+            "Viewer": 0,
+            "Subscriber": 1,
+            "Bot": 2,
+            "VIP": 3,
+            "Mod": 4,
+            "Moderator": 4,
+            "Lead Moderator": 5,
+            "Broadcaster": 6,
+            "Owner": 6,
+        }
 
         for username, profile in self.users_data.items():
             manual_role = (profile.get("manual_role") or "").strip()
@@ -158,7 +197,7 @@ class DashboardViewersMixin:
         if filter_name == "Active":
             return record["activity"] in {"Active now", "Active"}
         if filter_name == "Mods":
-            return record["role"] in {"Mod", "Broadcaster"}
+            return record["role"] in {"Lead Moderator", "Mod", "Moderator", "Broadcaster", "Owner"}
         if filter_name == "VIP":
             return record["role"] == "VIP"
         if filter_name == "Lurkers":
@@ -167,11 +206,15 @@ class DashboardViewersMixin:
     def role_sort_rank(self, role_name):
         return {
             "Broadcaster": 0,
-            "Mod": 1,
-            "VIP": 2,
-            "Subscriber": 3,
-            "Viewer": 3,
-        }.get(str(role_name or "").strip(), 3)
+            "Owner": 0,
+            "Lead Moderator": 1,
+            "Moderator": 2,
+            "Mod": 2,
+            "VIP": 3,
+            "Bot": 4,
+            "Subscriber": 5,
+            "Viewer": 6,
+        }.get(str(role_name or "").strip(), 6)
     def parse_viewer_sort_timestamp(self, raw_value):
         parsed = self.parse_profile_timestamp(raw_value)
         if parsed is None:
@@ -179,19 +222,21 @@ class DashboardViewersMixin:
         return parsed.timestamp()
     def sort_viewer_records(self, records):
         items = list(records or [])
-        sort_key = getattr(self, "viewer_sort_key", "newest")
+        sort_key = getattr(self, "viewer_sort_key", "messages")
         if sort_key == "messages":
             items.sort(
                 key=lambda item: (
                     -int(item.get("messages", 0) or 0),
+                    self.role_sort_rank(item.get("role", "")),
                     item.get("username", "").lower(),
                 )
             )
         elif sort_key == "oldest":
             items.sort(
                 key=lambda item: (
-                    self.parse_viewer_sort_timestamp(item.get("last_seen", "")),
+                    self.role_sort_rank(item.get("role", "")),
                     -int(item.get("messages", 0) or 0),
+                    self.parse_viewer_sort_timestamp(item.get("last_seen", "")),
                     item.get("username", "").lower(),
                 )
             )
@@ -206,8 +251,9 @@ class DashboardViewersMixin:
         else:
             items.sort(
                 key=lambda item: (
-                    -self.parse_viewer_sort_timestamp(item.get("last_seen", "")),
                     -int(item.get("messages", 0) or 0),
+                    self.role_sort_rank(item.get("role", "")),
+                    -self.parse_viewer_sort_timestamp(item.get("last_seen", "")),
                     item.get("username", "").lower(),
                 )
             )
@@ -273,7 +319,7 @@ class DashboardViewersMixin:
         if index < 0 or not hasattr(self, "viewer_sort_selector"):
             return
         sort_key = self.viewer_sort_selector.itemData(index)
-        if not sort_key or sort_key == getattr(self, "viewer_sort_key", "newest"):
+        if not sort_key or sort_key == getattr(self, "viewer_sort_key", "messages"):
             return
         self.viewer_sort_key = str(sort_key)
         self.settings["viewer_sort"] = self.viewer_sort_key
@@ -461,7 +507,7 @@ class DashboardViewersMixin:
             button.setStyleSheet(
                 f"""
                 QPushButton {{
-                    background: {background};
+                    background-color: {background};
                     color: {color};
                     border: 1px solid {border};
                     border-radius: 10px;
@@ -471,7 +517,7 @@ class DashboardViewersMixin:
                     font-weight: 700;
                 }}
                 QPushButton:hover {{
-                    background: {self.theme.nav_hover_bg};
+                    background-color: {self.theme.nav_hover_bg};
                     border-color: {self.theme.nav_hover_border};
                     color: {self.theme.text_primary};
                 }}
@@ -756,7 +802,7 @@ class DashboardViewersMixin:
         button.setStyleSheet(
             f"""
             QPushButton {{
-                background: {background};
+                background-color: {background};
                 color: {color};
                 border: 1px solid {border};
                 border-radius: 10px;
@@ -765,12 +811,12 @@ class DashboardViewersMixin:
                 font-weight: 700;
             }}
             QPushButton:hover:enabled {{
-                background: {hover_bg};
+                background-color: {hover_bg};
                 border-color: {hover_border};
                 color: {self.theme.text_primary};
             }}
             QPushButton:disabled {{
-                background: {self.theme.subtle_bg};
+                background-color: {self.theme.subtle_bg};
                 color: {self.theme.text_muted};
                 border-color: {self.theme.subtle_border};
             }}
@@ -1194,16 +1240,16 @@ class DashboardViewersMixin:
                 gridline-color: {self.theme.card_border};
                 color: {self.theme.text_primary};
                 font-size: 13px;
-                selection-background-color: {self.theme.nav_active_bg};
-                selection-color: {self.theme.text_primary};
+                selection-background-color: {self.theme.accent_color};
+                selection-color: {self.theme.text_inverse};
             }}
             QTableView::item, QTableWidget::item {{
                 border-bottom: 1px solid {self.theme.card_border};
                 padding: 12px 8px;
             }}
             QTableView::item:selected, QTableWidget::item:selected {{
-                background: {self.theme.nav_active_bg};
-                color: {self.theme.text_primary};
+                background: {self.theme.accent_color};
+                color: {self.theme.text_inverse};
             }}
             """
         )
@@ -1222,7 +1268,7 @@ class DashboardViewersMixin:
             button.setStyleSheet(
                 f"""
                 QPushButton {{
-                    background: {background};
+                    background-color: {background};
                     color: {color};
                     border: 1px solid {border};
                     border-radius: 10px;
@@ -1231,7 +1277,7 @@ class DashboardViewersMixin:
                     font-weight: 700;
                 }}
                 QPushButton:hover {{
-                    background: {self.theme.nav_hover_bg};
+                    background-color: {self.theme.nav_hover_bg};
                     border-color: {self.theme.nav_hover_border};
                     color: {self.theme.text_primary};
                 }}
@@ -1291,8 +1337,12 @@ class DashboardViewersMixin:
 
         role_colors = {
             "Broadcaster": self.theme.warning,
+            "Owner": self.theme.warning,
+            "Lead Moderator": self.theme.success,
+            "Moderator": self.theme.success,
             "Mod": self.theme.success,
             "VIP": self.theme.accent_secondary,
+            "Bot": self.theme.text_muted,
             "Subscriber": self.theme.accent,
             "Viewer": self.theme.text_secondary,
         }
@@ -1415,7 +1465,7 @@ class DashboardViewersMixin:
         role = role_lookup.get(username, "Viewer")
         activity = self.derive_viewer_activity_state(profile)
         last_messages = get_recent_user_only_messages(username, limit=4)
-        last_message = last_messages[-1] if last_messages else "No messages yet"
+        last_message = profile.get("last_message") or (last_messages[-1] if last_messages else "No messages yet")
         notes = profile.get("notes", "not enough information yet")
         behavior = profile.get("behavior", "neutral").replace("_", " ").title()
 
@@ -1423,7 +1473,7 @@ class DashboardViewersMixin:
         self.set_localized_text(self.viewer_selected_role_badge, role)
         self.apply_badge_style(
             self.viewer_selected_role_badge,
-            "success" if role in {"Mod", "Broadcaster"} else ("info" if role == "VIP" else "neutral"),
+            "success" if role in {"Lead Moderator", "Mod", "Moderator", "Broadcaster", "Owner"} else ("info" if role == "VIP" else "neutral"),
         )
         self.set_localized_text(self.viewer_selected_activity_badge, activity)
         activity_tone = "danger" if activity == "Muted" else ("success" if activity == "Active now" else "neutral")
@@ -1563,9 +1613,9 @@ class DashboardViewersMixin:
         filter_row.addStretch()
         filter_row.addWidget(self.make_small_title("Sort by"))
         self.viewer_sort_selector = QComboBox()
+        self.viewer_sort_selector.addItem("Messages", "messages")
         self.viewer_sort_selector.addItem("Newest", "newest")
         self.viewer_sort_selector.addItem("Oldest", "oldest")
-        self.viewer_sort_selector.addItem("Messages", "messages")
         self.viewer_sort_selector.addItem("Role", "role")
         self.viewer_sort_selector.currentIndexChanged.connect(self.on_viewer_sort_changed)
         filter_row.addWidget(self.viewer_sort_selector)
@@ -1812,7 +1862,7 @@ class DashboardViewersMixin:
         self.viewer_relationship_total_pages = 1
         self.viewer_relationship_current_rows = []
         self.viewer_relationship_rows_cache = {}
-        self.set_sort_selector_value(self.viewer_sort_selector, getattr(self, "viewer_sort_key", "newest"))
+        self.set_sort_selector_value(self.viewer_sort_selector, getattr(self, "viewer_sort_key", "messages"))
         self.set_sort_selector_value(self.relationship_sort_selector, getattr(self, "relationship_sort_key", "newest"))
         self.sync_viewer_filter_buttons()
         self.clear_viewer_details_panel()

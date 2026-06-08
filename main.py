@@ -5,6 +5,7 @@ import traceback
 
 from core.app_paths import WINDOW_ICON_ICO, WINDOW_ICON_JPEG, WINDOW_ICON_JPG, WINDOW_ICON_PNG
 from core.runtime_env import configure_qt_plugin_env, configure_ssl_cert_env
+from core.support import install_crash_hooks, write_crash_report
 from core.ui.constants import APP_ID, APP_NAME
 
 RUN_BOT_FLAG = "--run-bot"
@@ -41,6 +42,7 @@ def launch_desktop_app():
     configure_ssl_cert_env()
     qt_plugin_path = configure_qt_plugin_env()
     configure_windows_identity()
+    install_crash_hooks()
 
     from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -61,6 +63,7 @@ def launch_desktop_app():
         window.show()
         return app.exec()
     except Exception as exc:
+        write_crash_report(type(exc), exc, exc.__traceback__, source="startup")
         traceback.print_exc()
         QMessageBox.critical(
             None,

@@ -129,7 +129,7 @@ class DashboardTwitchMixin:
         shadow = QGraphicsDropShadowEffect(widget)
         shadow.setBlurRadius(blur)
         shadow.setOffset(0, offset_y)
-        shadow_color = QColor("#020617")
+        shadow_color = QColor(self.theme.app_background)
         shadow_color.setAlpha(alpha)
         shadow.setColor(shadow_color)
         widget.setGraphicsEffect(shadow)
@@ -140,8 +140,8 @@ class DashboardTwitchMixin:
         card.setStyleSheet(
             f"""
             QFrame[twitchAuthCard="true"] {{
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {self.theme.card_bg}, stop:1 {self.theme.subtle_bg});
-                border: none;
+                background: {self.theme.card_background};
+                border: 1px solid {self.theme.border_color};
                 border-radius: 20px;
             }}
             """
@@ -684,18 +684,21 @@ class DashboardTwitchMixin:
         menu.setStyleSheet(
             f"""
             QMenu {
-                background: {self.theme.menu_bg};
+                background-color: {self.theme.panel_background};
                 color: {self.theme.text_primary};
-                border: 1px solid {self.theme.menu_border};
+                border: 1px solid {self.theme.border_color};
                 border-radius: 12px;
                 padding: 8px;
             }
             QMenu::item {
+                background-color: transparent;
+                color: {self.theme.text_primary};
                 padding: 8px 16px;
                 border-radius: 8px;
             }
             QMenu::item:selected {
-                background: {self.theme.menu_hover};
+                background-color: {self.theme.accent_color};
+                color: {self.theme.text_inverse};
             }
             """
         )

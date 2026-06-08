@@ -18,8 +18,14 @@ $ReleaseRoot = Join-Path $ProjectPath "shareable"
 $PortableName = "1SalemBOT-Portable-v$AppVersion"
 $PortablePath = Join-Path $ReleaseRoot $PortableName
 $PortableZipPath = Join-Path $ReleaseRoot "1SalemBOT_Portable_v$AppVersion.zip"
+$VersionJsonPath = Join-Path $ReleaseRoot "version.json"
 $InstallerScriptPath = Join-Path $ProjectPath "installer.iss"
 $InstallerOutputPath = Join-Path $ReleaseRoot "1SalemBOT_Setup_v$AppVersion.exe"
+$GitHubOwner = "salemq8"
+$GitHubRepo = "1SalemBOT"
+$GitHubLatestDownloadBase = "https://github.com/$GitHubOwner/$GitHubRepo/releases/latest/download"
+$InstallerAssetName = "1SalemBOT_Setup_v$AppVersion.exe"
+$PortableAssetName = "1SalemBOT_Portable_v$AppVersion.zip"
 $BuiltAppPath = Join-Path $ProjectPath "dist\1SalemBOT"
 $VlcSourcePath = Join-Path ${env:ProgramFiles} "VideoLAN\VLC"
 $VlcTargetPath = Join-Path $PortablePath "vlc"
@@ -159,6 +165,65 @@ if (-not (Test-Path $InstallerOutputPath)) {
     throw "Installer build failed"
 }
 
+$releaseNotes = @()
+$changelogPath = Join-Path $ProjectPath "CHANGELOG.md"
+if (Test-Path $changelogPath) {
+    $changelogLines = Get-Content -LiteralPath $changelogPath -Encoding UTF8
+    $insideCurrentVersion = $false
+    foreach ($line in $changelogLines) {
+        if ($line -match "^##\s+v$([regex]::Escape($AppVersion))\b") {
+            $insideCurrentVersion = $true
+            continue
+        }
+        if ($insideCurrentVersion -and $line -match "^##\s+") {
+            break
+        }
+        if ($insideCurrentVersion) {
+            $clean = $line.Trim()
+            if ($clean -and -not $clean.StartsWith("###")) {
+                $releaseNotes += $clean
+            }
+        }
+    }
+}
+if (-not $releaseNotes) {
+    $releaseNotes = @("1SalemBOT v$AppVersion release.")
+}
+
+$versionPayload = [ordered]@{
+    version = $AppVersion
+    installer_url = "$GitHubLatestDownloadBase/$InstallerAssetName"
+    portable_url = "$GitHubLatestDownloadBase/$PortableAssetName"
+    release_notes = $releaseNotes
+    channel = "stable"
+    installer = [ordered]@{
+        name = $InstallerAssetName
+        url = "$GitHubLatestDownloadBase/$InstallerAssetName"
+        sha256 = (Get-FileHash -LiteralPath $InstallerOutputPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        silent_args = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+        supports_silent = $true
+    }
+    portable = [ordered]@{
+        name = $PortableAssetName
+        url = "$GitHubLatestDownloadBase/$PortableAssetName"
+        sha256 = (Get-FileHash -LiteralPath $PortableZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        supports_silent = $false
+    }
+}
+
+$versionJson = $versionPayload | ConvertTo-Json -Depth 8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($VersionJsonPath, $versionJson, $utf8NoBom)
+Copy-Item -LiteralPath $VersionJsonPath -Destination (Join-Path $PortablePath "version.json") -Force
+
+$requiredReleaseFiles = @($InstallerOutputPath, $PortableZipPath, $VersionJsonPath)
+foreach ($requiredReleaseFile in $requiredReleaseFiles) {
+    if (-not (Test-Path -LiteralPath $requiredReleaseFile)) {
+        throw "Release artifact missing: $requiredReleaseFile"
+    }
+}
+
 Write-Host "Portable build created at $PortablePath"
 Write-Host "Portable zip created at $PortableZipPath"
 Write-Host "Installer created at $InstallerOutputPath"
+Write-Host "Update metadata created at $VersionJsonPath"

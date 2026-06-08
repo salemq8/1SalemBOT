@@ -129,6 +129,9 @@ class TwitchEventSubClient:
             event = payload["payload"].get("event", {})
             subscription_type = subscription.get("type", "")
             if subscription_type == "channel.chat.message":
+                eventsub_message_id = metadata.get("message_id")
+                if eventsub_message_id and "_eventsub_message_id" not in event:
+                    event["_eventsub_message_id"] = eventsub_message_id
                 chatter = event.get("chatter_user_login", "")
                 text = event.get("message", {}).get("text", "")
                 self.logger(f"[EVENTSUB] Chat event received from {chatter}: {text}")

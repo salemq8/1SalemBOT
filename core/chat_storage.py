@@ -507,6 +507,7 @@ def get_user_profile(user_profiles, username):
             "last_seen": "",
             "behavior": "neutral",
             "notes": "not enough information yet",
+            "last_message": "",
             "muted": False,
             "manual_role": "",
         },

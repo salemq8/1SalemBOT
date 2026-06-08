@@ -4,6 +4,8 @@ import time
 
 import requests
 
+from .themes import DEFAULT_THEME_NAME, THEMES
+
 
 BADGE_CACHE_TTL_SECONDS = 1800
 REQUEST_TIMEOUT_SECONDS = 15
@@ -28,16 +30,17 @@ class ChatRenderer:
         self.image_data_uri_cache = {}
         self.last_badge_catalog_refresh_at = 0.0
         self.requests_session = requests.Session()
+        theme = THEMES[DEFAULT_THEME_NAME]
         self.colors = {
-            "background": "#020617",
-            "text_primary": "#f8fafc",
-            "text_secondary": "#e2e8f0",
-            "text_muted": "#94a3b8",
-            "accent": "#60a5fa",
-            "warning": "#f59e0b",
-            "chip_bg": "#312e81",
-            "badge_bg": "#334155",
-            "badge_text": "#ffffff",
+            "background": theme.input_bg,
+            "text_primary": theme.text_primary,
+            "text_secondary": theme.text_secondary,
+            "text_muted": theme.text_muted,
+            "accent": theme.accent,
+            "warning": theme.warning,
+            "chip_bg": theme.elevated_card_background,
+            "badge_bg": theme.elevated_card_background,
+            "badge_text": theme.text_primary,
         }
 
     def apply_theme(self, theme):
@@ -48,9 +51,9 @@ class ChatRenderer:
             "text_muted": theme.text_muted,
             "accent": theme.accent_hover,
             "warning": theme.warning,
-            "chip_bg": theme.accent_soft,
-            "badge_bg": theme.muted_button,
-            "badge_text": theme.text_inverse,
+            "chip_bg": theme.elevated_card_background,
+            "badge_bg": theme.elevated_card_background,
+            "badge_text": theme.text_primary,
         }
 
     def colorize_text(self, text: str):

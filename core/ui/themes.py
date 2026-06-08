@@ -103,9 +103,34 @@ class ThemePalette:
             "warning": ButtonColors(self.warning, self.warning_hover, self.warning_text, self.warning_border),
             "muted": ButtonColors(self.muted_button, self.muted_button_hover, self.text_primary, self.muted_button_border),
             "twitch": ButtonColors(self.accent_secondary, self.accent_hover, self.text_inverse, self.accent_border),
+            "ghost": ButtonColors(self.elevated_card_background, self.nav_hover_bg, self.text_primary, self.border_color),
             "chip-remove": ButtonColors(self.chip_remove_bg, self.chip_remove_hover, self.text_inverse, self.chip_border_hover),
         }
         return role_map.get(role, role_map["muted"])
+
+    @property
+    def app_background(self) -> str:
+        return self.window_bg
+
+    @property
+    def panel_background(self) -> str:
+        return self.window_bg_alt
+
+    @property
+    def card_background(self) -> str:
+        return self.card_bg
+
+    @property
+    def elevated_card_background(self) -> str:
+        return self.subtle_bg
+
+    @property
+    def border_color(self) -> str:
+        return self.card_border
+
+    @property
+    def accent_color(self) -> str:
+        return self.accent
 
     def status_colors(self, tone: str) -> StatusColors:
         palette = {
@@ -510,26 +535,64 @@ class ThemeManager:
         return [(name, theme.display_name) for name, theme in THEMES.items()]
 
 
+def build_combo_popup_stylesheet(theme: ThemePalette):
+    return f"""
+    QListView {{
+        background-color: {theme.panel_background};
+        color: {theme.text_primary};
+        border: 1px solid {theme.border_color};
+        border-radius: 8px;
+        padding: 6px;
+        outline: none;
+        selection-background-color: {theme.accent_color};
+        selection-color: {theme.text_inverse};
+    }}
+    QListView::item {{
+        color: {theme.text_primary};
+        min-height: 28px;
+        padding: 7px 10px;
+        border-radius: 6px;
+    }}
+    QListView::item:hover {{
+        background-color: {theme.accent_color};
+        color: {theme.text_inverse};
+    }}
+    QListView::item:selected {{
+        background-color: {theme.accent_color};
+        color: {theme.text_inverse};
+    }}
+    """
+
+
 def build_app_stylesheet(theme: ThemePalette):
     def button_rule(role: str):
         colors = theme.button_colors(role)
         return f"""
         QPushButton[buttonRole="{role}"] {{
-            background: {colors.background};
+            background-color: {colors.background};
             color: {colors.text};
             border: 1px solid {colors.border};
             border-radius: 12px;
-            padding: 10px 14px;
+            padding: 10px 16px;
             font-size: 13px;
-            font-weight: 600;
+            font-weight: 700;
+            min-height: 18px;
         }}
         QPushButton[buttonRole="{role}"]:hover {{
-            background: {colors.hover};
+            background-color: {colors.hover};
             border-color: {colors.border};
+        }}
+        QPushButton[buttonRole="{role}"]:pressed {{
+            background-color: {colors.hover};
+            padding-top: 11px;
+            padding-bottom: 9px;
+        }}
+        QPushButton[buttonRole="{role}"]:focus {{
+            border-color: {theme.accent_border};
         }}
         QPushButton[buttonRole="{role}"]:disabled {{
             color: {theme.text_muted};
-            background: {theme.subtle_bg};
+            background-color: {theme.subtle_bg};
             border-color: {theme.card_border};
         }}
         """
@@ -538,54 +601,160 @@ def build_app_stylesheet(theme: ThemePalette):
     QWidget {{
         color: {theme.text_primary};
     }}
+    QMainWindow {{
+        background: {theme.app_background};
+    }}
+    QWidget#appRoot, QStackedWidget#mainStack {{
+        background: {theme.app_background};
+    }}
+    QStackedWidget#mainStack > QWidget {{
+        background: transparent;
+    }}
     QFrame[cardFrame="true"] {{
-        background: {theme.card_bg};
-        border: 1px solid {theme.card_border};
+        background: {theme.card_background};
+        border: 1px solid {theme.border_color};
         border-radius: 18px;
     }}
+    QFrame[cardFrame="true"]:hover {{
+        border-color: {theme.subtle_border};
+    }}
     QFrame[surfaceRole="sidebar"] {{
-        background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {theme.sidebar_bg}, stop:1 {theme.sidebar_bg_alt});
+        background: {theme.panel_background};
         border-right: 1px solid {theme.sidebar_border};
     }}
     QFrame[surfaceRole="brand"] {{
-        background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {theme.brand_bg}, stop:1 {theme.brand_bg_alt});
-        border: 1px solid {theme.brand_border};
+        background: {theme.elevated_card_background};
+        border: 1px solid {theme.border_color};
         border-radius: 18px;
     }}
     QFrame[surfaceRole="main"] {{
-        background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {theme.window_bg}, stop:1 {theme.window_bg_alt});
+        background: {theme.app_background};
     }}
     QFrame[surfaceRole="subtle"] {{
-        background: {theme.subtle_bg};
-        border: 1px solid {theme.subtle_border};
+        background: {theme.elevated_card_background};
+        border: 1px solid {theme.border_color};
         border-radius: 12px;
     }}
     QFrame[surfaceRole="twitchStep"] {{
-        background: {theme.subtle_bg};
-        border: 1px solid {theme.subtle_border};
+        background: {theme.elevated_card_background};
+        border: 1px solid {theme.border_color};
         border-radius: 14px;
     }}
     QLineEdit, QPlainTextEdit, QTextEdit, QListWidget, QTableWidget, QComboBox {{
-        background: {theme.input_bg};
+        background-color: {theme.input_bg};
         color: {theme.input_text};
-        border: 1px solid {theme.input_border};
+        border: 1px solid {theme.border_color};
         border-radius: 10px;
         padding: 8px;
         font-size: 13px;
+        selection-background-color: {theme.accent_color};
+        selection-color: {theme.text_inverse};
     }}
     QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QListWidget:focus, QTableWidget:focus, QComboBox:focus {{
-        border: 1px solid {theme.input_focus};
+        border: 1px solid {theme.accent_color};
+        background-color: {theme.input_bg};
     }}
     QComboBox::drop-down {{
         border: none;
         width: 28px;
     }}
     QComboBox QAbstractItemView {{
-        background: {theme.menu_bg};
+        background-color: {theme.panel_background};
         color: {theme.text_primary};
-        border: 1px solid {theme.menu_border};
-        selection-background-color: {theme.menu_hover};
-        selection-color: {theme.text_primary};
+        border: 1px solid {theme.border_color};
+        border-radius: 8px;
+        padding: 6px;
+        outline: none;
+        selection-background-color: {theme.accent_color};
+        selection-color: {theme.text_inverse};
+    }}
+    QComboBox QAbstractItemView::item {{
+        color: {theme.text_primary};
+        min-height: 28px;
+        padding: 7px 10px;
+        border-radius: 6px;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background-color: {theme.accent_color};
+        color: {theme.text_inverse};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: {theme.accent_color};
+        color: {theme.text_inverse};
+    }}
+    QMenu {{
+        background-color: {theme.panel_background};
+        color: {theme.text_primary};
+        border: 1px solid {theme.border_color};
+        border-radius: 12px;
+        padding: 8px;
+    }}
+    QMenu::item {{
+        background-color: transparent;
+        color: {theme.text_primary};
+        padding: 8px 16px;
+        border-radius: 8px;
+    }}
+    QMenu::item:selected {{
+        background-color: {theme.accent_color};
+        color: {theme.text_inverse};
+    }}
+    QPushButton {{
+        background-color: {theme.muted_button};
+        color: {theme.text_primary};
+        border: 1px solid {theme.muted_button_border};
+        border-radius: 12px;
+        padding: 9px 14px;
+        font-size: 13px;
+        font-weight: 700;
+    }}
+    QPushButton:hover {{
+        background-color: {theme.muted_button_hover};
+        border-color: {theme.accent_border};
+    }}
+    QPushButton:pressed {{
+        background-color: {theme.muted_button_hover};
+        padding-top: 10px;
+        padding-bottom: 8px;
+    }}
+    QPushButton:disabled {{
+        background-color: {theme.elevated_card_background};
+        color: {theme.text_muted};
+        border-color: {theme.border_color};
+    }}
+    QCheckBox {{
+        spacing: 8px;
+        color: {theme.text_secondary};
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QCheckBox::indicator {{
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
+        background-color: {theme.input_bg};
+        border: 1px solid {theme.border_color};
+    }}
+    QCheckBox::indicator:hover {{
+        border-color: {theme.accent_border};
+    }}
+    QCheckBox::indicator:checked {{
+        background-color: {theme.accent};
+        border-color: {theme.accent_border};
+    }}
+    QProgressBar {{
+        background-color: {theme.input_bg};
+        border: 1px solid {theme.border_color};
+        border-radius: 8px;
+        color: {theme.text_primary};
+        min-height: 14px;
+        text-align: center;
+        font-size: 11px;
+        font-weight: 700;
+    }}
+    QProgressBar::chunk {{
+        background-color: {theme.accent};
+        border-radius: 7px;
     }}
     QSlider::groove:horizontal {{
         background: {theme.subtle_bg};
@@ -610,13 +779,63 @@ def build_app_stylesheet(theme: ThemePalette):
         background: transparent;
         border: none;
     }}
+    QScrollArea > QWidget > QWidget {{
+        background: transparent;
+    }}
+    QListWidget {{
+        background-color: {theme.input_bg};
+        border: 1px solid {theme.border_color};
+        border-radius: 12px;
+        padding: 8px;
+        selection-background-color: {theme.nav_active_bg};
+        selection-color: {theme.text_primary};
+    }}
     QListWidget::item {{
-        padding: 6px 8px;
+        padding: 8px 10px;
         border-radius: 8px;
+        margin: 2px 0;
+    }}
+    QListWidget::item:hover {{
+        background: {theme.elevated_card_background};
     }}
     QListWidget::item:selected {{
-        background: {theme.subtle_bg};
+        background: {theme.nav_active_bg};
         border: 1px solid {theme.accent_border};
+        color: {theme.nav_active_text};
+    }}
+    QTableView, QTableWidget {{
+        alternate-background-color: {theme.elevated_card_background};
+        selection-background-color: {theme.accent_color};
+        selection-color: {theme.text_inverse};
+    }}
+    QHeaderView::section {{
+        background: {theme.elevated_card_background};
+        color: {theme.text_secondary};
+        border: none;
+        border-bottom: 1px solid {theme.border_color};
+        padding: 8px;
+        font-size: 12px;
+        font-weight: 700;
+    }}
+    QScrollBar:vertical, QScrollBar:horizontal {{
+        background: transparent;
+        border: none;
+        margin: 2px;
+    }}
+    QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+        background: {theme.subtle_border};
+        border-radius: 4px;
+        min-height: 28px;
+        min-width: 28px;
+    }}
+    QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+        background: {theme.accent_border};
+    }}
+    QScrollBar::add-line, QScrollBar::sub-line {{
+        width: 0;
+        height: 0;
+        border: none;
+        background: transparent;
     }}
     QPushButton, QComboBox, QLineEdit, QTextEdit, QPlainTextEdit, QListWidget, QTableWidget, QTableView {{
         transition: all 160ms ease-in-out;

@@ -5,13 +5,13 @@ import threading
 import time
 import weakref
 from datetime import datetime
+from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -19,8 +19,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -39,6 +42,7 @@ from core.app_paths import (
     ALERT_STATUS_FILE,
     CHAT_LOG_FILE,
     DASHBOARD_STATE_FILE,
+    LOGS_DIR,
     MUSIC_COMMAND_FILE,
     PROJECT_ROOT,
     SETTINGS_FILE,
@@ -93,7 +97,18 @@ from core.twitch_api import (
     get_user_by_login,
     send_chat_message,
 )
-from core.update_manager import UpdateManager
+from core.update_manager import UpdateCancelled, UpdateError, UpdateManager
+from core.support import (
+    SUPPORT_EMAIL,
+    clear_pending_crash_report,
+    create_crash_outlook_draft,
+    create_support_outlook_draft,
+    crash_mailto_url,
+    diagnostic_summary,
+    ensure_logs_dir,
+    pending_crash_report,
+    support_mailto_url,
+)
 
 from .chat_renderer import ChatRenderer
 from .constants import (
@@ -116,13 +131,13 @@ from .localization import (
     resolve_text_key,
     translate_text,
 )
-from .themes import ThemeManager, build_app_stylesheet
+from .themes import ThemeManager, build_app_stylesheet, build_combo_popup_stylesheet
 from core.chat_storage import load_dashboard_state
 
 from .music_mixin import DashboardMusicMixin
 from .twitch_mixin import DashboardTwitchMixin
 from .viewers_mixin import DashboardViewersMixin
-from .widgets import AnalyticsChartWidget, Bridge, Card, SidebarAccountCard, SidebarButton, StatusDot, ThumbnailWidget, TriggerChipWidget
+from .widgets import ActionButton, AnalyticsChartWidget, Bridge, Card, SidebarAccountCard, SidebarButton, StatusDot, ThemedCheckBox, ThumbnailWidget, TriggerChipWidget
 
 ALERT_FEED_TYPES = (
     "All",
@@ -204,6 +219,9 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.process = None
         self.alerts_process = None
         self.alerts_autostart_attempted = False
+        self.restart_in_progress = False
+        self.startup_auto_restart_scheduled = False
+        self.startup_auto_restart_ran = False
         self.bridge = Bridge()
         self.bridge.log_signal.connect(self.append_log)
         self.bridge.cover_signal.connect(self._apply_cover_pixmap)
@@ -214,11 +232,24 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.bridge.stream_summary_signal.connect(self._apply_stream_summary)
         self.bridge.viewer_relationships_signal.connect(self._apply_viewer_relationships_payload)
         self.bridge.auth_health_signal.connect(self._apply_auth_health_payload)
+        self.bridge.update_status_signal.connect(self.apply_update_status_payload)
+        self.bridge.update_check_result_signal.connect(self.handle_update_check_result)
+        self.bridge.update_progress_signal.connect(self.handle_update_progress_payload)
+        self.bridge.update_download_result_signal.connect(self.handle_update_download_result)
+        self.bridge.music_playlist_signal.connect(self.apply_playlist_import_result)
+        self.bridge.music_track_request_signal.connect(self.apply_track_request_result)
 
         self.settings = load_json(SETTINGS_FILE, {})
         self.language = normalize_language(self.settings.get("language", DEFAULT_LANGUAGE))
         self.update_manager = UpdateManager.from_settings(self.settings)
         self.update_config = self.update_manager.config
+        self.update_check_inflight = False
+        self.update_download_inflight = False
+        self.update_install_inflight = False
+        self.update_cancel_event = None
+        self.pending_update_release = None
+        self.pending_update_asset = None
+        self.installing_update = False
         self._localized_bindings = []
         self._localized_binding_keys = set()
         self._language_applying = False
@@ -232,10 +263,13 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.music_player = None
         self.music_player_initialized = False
         self.music_queue = []
+        self.music_queue_titles = {}
+        self.current_track_query = ""
         self.current_track_active = False
         self.current_track_title = ""
         self.current_track_started_at = 0.0
         self.music_loading = False
+        self.playlist_import_loading = False
         self.last_music_command_timestamp = None
         self.trigger_list = []
         self.auth_widgets = {}
@@ -263,6 +297,10 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.audio_volume = max(0, min(100, int(self.settings.get("audio_volume", 100))))
         self.audio_muted = bool(self.settings.get("audio_muted", False))
         self.audio_session_attached = False
+        self.prevent_duplicate_tracks = bool(self.settings.get("prevent_duplicate_tracks", True))
+        self.auto_restart_bot_on_startup = bool(self.settings.get("auto_restart_bot_on_startup", True))
+        self.queue_count_labels = []
+        self.prevent_duplicate_checkboxes = []
         self.volume_control_rows = []
         self.volume_slider_widgets = []
         self.volume_value_labels = []
@@ -271,7 +309,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.chat_asset_signature = None
         self.pending_chat_asset_signature = None
         self.viewer_filter_name = "All"
-        self.viewer_sort_key = str(self.settings.get("viewer_sort", "newest") or "newest")
+        self.viewer_sort_key = str(self.settings.get("viewer_sort", "messages") or "messages")
         self.relationship_sort_key = str(self.settings.get("relationship_sort", "newest") or "newest")
         self.viewer_filter_buttons = {}
         self.selected_viewer_username = ""
@@ -633,6 +671,100 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         widget.style().unpolish(widget)
         widget.style().polish(widget)
         widget.update()
+
+    def combo_popup_stylesheet(self):
+        return build_combo_popup_stylesheet(self.theme)
+
+    def combo_box_stylesheet(self):
+        return f"""
+        QComboBox {{
+            background-color: {self.theme.input_bg};
+            color: {self.theme.input_text};
+            border: 1px solid {self.theme.border_color};
+            border-radius: 10px;
+            padding: 8px 34px 8px 10px;
+            min-height: 20px;
+            font-size: 13px;
+            selection-background-color: {self.theme.accent_color};
+            selection-color: {self.theme.text_inverse};
+        }}
+        QComboBox:hover {{
+            border-color: {self.theme.accent_border};
+        }}
+        QComboBox:focus {{
+            border-color: {self.theme.accent_color};
+            background-color: {self.theme.input_bg};
+        }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 30px;
+            border-left: 1px solid {self.theme.border_color};
+            border-top-right-radius: 10px;
+            border-bottom-right-radius: 10px;
+            background-color: {self.theme.elevated_card_background};
+        }}
+        """
+
+    def input_control_stylesheet(self, widget_type="QLineEdit"):
+        return f"""
+        {widget_type} {{
+            background-color: {self.theme.input_bg};
+            color: {self.theme.input_text};
+            border: 1px solid {self.theme.border_color};
+            border-radius: 10px;
+            padding: 8px 10px;
+            min-height: 20px;
+            font-size: 13px;
+            selection-background-color: {self.theme.accent_color};
+            selection-color: {self.theme.text_inverse};
+        }}
+        {widget_type}:hover {{
+            border-color: {self.theme.accent_border};
+        }}
+        {widget_type}:focus {{
+            border-color: {self.theme.accent_color};
+            background-color: {self.theme.input_bg};
+        }}
+        QLineEdit[readOnlyDisplay="true"] {{
+            background-color: {self.theme.elevated_card_background};
+            color: {self.theme.text_secondary};
+            border: 1px solid {self.theme.border_color};
+            border-radius: 10px;
+            padding: 8px 10px;
+            min-height: 20px;
+        }}
+        """
+
+    def apply_input_control_style(self, widget):
+        if widget is None:
+            return
+        if isinstance(widget, QPlainTextEdit):
+            widget_type = "QPlainTextEdit"
+            widget.setMinimumHeight(max(widget.minimumHeight(), 90))
+        elif isinstance(widget, QTextEdit):
+            widget_type = "QTextEdit"
+        else:
+            widget_type = "QLineEdit"
+            widget.setMinimumHeight(max(widget.minimumHeight(), 38))
+        widget.setStyleSheet(self.input_control_stylesheet(widget_type))
+        self.polish_widget(widget)
+
+    def apply_combo_popup_style(self, combo):
+        if combo is None:
+            return
+        view = combo.view()
+        if not isinstance(view, QListView):
+            view = QListView(combo)
+            combo.setView(view)
+        combo.setMinimumHeight(max(combo.minimumHeight(), 38))
+        view.setAutoFillBackground(True)
+        view.setUniformItemSizes(True)
+        view.setMouseTracking(True)
+        view.setStyleSheet(self.combo_popup_stylesheet())
+        combo.setStyleSheet(self.combo_box_stylesheet())
+        self.polish_widget(combo)
+        self.polish_widget(view)
 
     def save_theme_preference(self):
         self.settings["theme"] = self.theme_name
@@ -1067,6 +1199,8 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 widget.apply_language(self.language)
             for widget in self.findChildren(AnalyticsChartWidget):
                 widget.apply_language(self.language)
+            for widget in self.findChildren(QComboBox):
+                self.apply_combo_popup_style(widget)
             self.sync_language_selector()
             if refresh_content:
                 self.refresh_token_status()
@@ -1360,10 +1494,9 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
 
         row_layout.addLayout(content_layout, 1)
 
-        menu_button = QPushButton("⋯")
+        menu_button = ActionButton("⋯", "ghost", self.theme)
         menu_button.setCursor(Qt.PointingHandCursor)
         menu_button.setFixedSize(32, 32)
-        menu_button.setProperty("buttonRole", "ghost")
         menu_button.setProperty("i18n_source_tooltip", "More actions")
         menu_button.setToolTip(self.localize("More actions"))
         row_layout.addWidget(menu_button, 0, Qt.AlignTop)
@@ -1666,16 +1799,15 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.apply_badge_style(self.dashboard_status_badge, tone)
 
     def make_button(self, text, role, callback):
-        button = QPushButton(self.localize(text))
+        button = ActionButton(self.localize(text), role, self.theme)
         self._set_i18n_source(button, text)
-        button.setCursor(Qt.PointingHandCursor)
         button.clicked.connect(callback)
-        button.setProperty("buttonRole", role)
         return button
 
     def make_labeled_entry(self, parent_layout, label_text):
         parent_layout.addWidget(self.make_small_title(label_text))
         entry = QLineEdit()
+        self.apply_input_control_style(entry)
         parent_layout.addWidget(entry)
         return entry
 
@@ -1683,6 +1815,10 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setAttribute(Qt.WA_StyledBackground, True)
+        scroll.viewport().setAutoFillBackground(False)
+        body.setAttribute(Qt.WA_StyledBackground, True)
+        body.setStyleSheet("background: transparent; border: none;")
         scroll.setWidget(body)
         return scroll
 
@@ -1800,6 +1936,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.theme_selector = QComboBox()
         for theme_name, display_name in self.theme_manager.list_choices():
             self.theme_selector.addItem(display_name, theme_name)
+        self.apply_combo_popup_style(self.theme_selector)
         self.theme_selector.currentIndexChanged.connect(self.on_theme_selector_changed)
         layout.addWidget(self.theme_selector)
 
@@ -1807,6 +1944,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.language_selector = QComboBox()
         self.language_selector.addItem(language_display_name("en", "en"), "en")
         self.language_selector.addItem("العربية", "ar")
+        self.apply_combo_popup_style(self.language_selector)
         self.language_selector.currentIndexChanged.connect(self.on_language_selector_changed)
         layout.addWidget(self.language_selector)
 
@@ -1819,6 +1957,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 self.localization_key(label),
                 TRANSLATION_SOURCE_ROLE,
             )
+        self.apply_combo_popup_style(self.log_retention_selector)
         self.log_retention_selector.currentIndexChanged.connect(self.on_log_retention_selector_changed)
         layout.addWidget(self.log_retention_selector)
         return card
@@ -1867,6 +2006,12 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         button_row.addWidget(self.make_button("Restart Bot", "warning", self.restart_bot))
         layout.addLayout(button_row)
 
+        self.auto_restart_startup_checkbox = ThemedCheckBox(self.localize("Auto Restart Bot on Startup"), self.theme)
+        self._set_i18n_source(self.auto_restart_startup_checkbox, "Auto Restart Bot on Startup")
+        self.auto_restart_startup_checkbox.setChecked(bool(self.auto_restart_bot_on_startup))
+        self.auto_restart_startup_checkbox.toggled.connect(self.on_auto_restart_startup_toggled)
+        layout.addWidget(self.auto_restart_startup_checkbox)
+
         layout.addWidget(self.make_small_title("Send Manual Message as Bot"))
         self.manual_message_entry = QLineEdit()
         self.manual_message_entry.setPlaceholderText("Type a message to send directly to chat")
@@ -1905,25 +2050,36 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         status_row.addLayout(provider_col, 1)
         layout.addLayout(status_row)
 
-        note = QLabel()
-        note.setWordWrap(True)
-        self.set_label_role(note, "mutedBody")
-        self.set_localized_text(note, "Update checks are prepared but not enabled yet.")
-        layout.addWidget(note)
+        self.update_status_value = QLabel()
+        self.update_status_value.setWordWrap(True)
+        self.set_label_role(self.update_status_value, "mutedBody")
+        self.set_localized_text(self.update_status_value, "Ready to check for updates.")
+        layout.addWidget(self.update_status_value)
+
+        self.update_progress_bar = QProgressBar()
+        self.update_progress_bar.setRange(0, 100)
+        self.update_progress_bar.setValue(0)
+        self.update_progress_bar.setVisible(False)
+        layout.addWidget(self.update_progress_bar)
 
         actions_row = QHBoxLayout()
         actions_row.setSpacing(8)
-        self.check_updates_button = self.make_button("Check for Updates", "primary", self.check_for_updates_placeholder)
+        self.check_updates_button = self.make_button("Check for Updates", "primary", self.check_for_updates)
         actions_row.addWidget(self.check_updates_button)
 
-        self.auto_update_checkbox = QCheckBox(self.localize("Auto Update"))
+        self.cancel_update_button = self.make_button("Cancel Download", "danger", self.cancel_update_download)
+        self.cancel_update_button.setEnabled(False)
+        actions_row.addWidget(self.cancel_update_button)
+
+        self.auto_update_checkbox = ThemedCheckBox(self.localize("Auto Update"), self.theme)
         self._set_i18n_source(self.auto_update_checkbox, "Auto Update")
-        self.auto_update_checkbox.setChecked(False)
-        self.auto_update_checkbox.setEnabled(False)
-        self.auto_update_checkbox.setToolTip(self.localize("Auto Update is prepared for future releases and is currently disabled."))
+        self.auto_update_checkbox.setChecked(bool(self.update_config.auto_update_enabled))
+        self.auto_update_checkbox.setEnabled(True)
+        self.auto_update_checkbox.toggled.connect(self.on_auto_update_toggled)
+        self.auto_update_checkbox.setToolTip(self.localize("Automatically check for updates on startup."))
         self.set_localized_tooltip(
             self.auto_update_checkbox,
-            "Auto Update is prepared for future releases and is currently disabled.",
+            "Automatically check for updates on startup.",
         )
         actions_row.addWidget(self.auto_update_checkbox)
         actions_row.addStretch()
@@ -1936,9 +2092,375 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         layout.addWidget(config_note)
         return card
 
-    def check_for_updates_placeholder(self):
-        result = self.update_manager.check_for_updates()
-        self.append_log(result.get("reason") or "Update checks are prepared but not enabled yet.")
+    def build_technical_support_card(self):
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+        layout.addWidget(self.make_title("Technical Support"))
+
+        email_label = QLabel(f"Support Email: {SUPPORT_EMAIL}")
+        email_label.setWordWrap(True)
+        self.set_label_role(email_label, "mutedBody")
+        layout.addWidget(email_label)
+
+        description = QLabel("Support tools open your mail app or local logs folder. No emails are sent automatically.")
+        description.setWordWrap(True)
+        self.set_label_role(description, "mutedBody")
+        layout.addWidget(description)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        button_row.addWidget(self.make_button("Send Support Email", "primary", self.open_support_email))
+        button_row.addWidget(self.make_button("Open Logs Folder", "muted", self.open_logs_folder))
+        button_row.addWidget(self.make_button("Copy Diagnostic Info", "muted", self.copy_diagnostic_info))
+        discord_button = self.make_button("Discord Support", "muted", lambda: None)
+        discord_button.setEnabled(False)
+        discord_button.setToolTip(self.localize("Coming Soon"))
+        self.set_localized_tooltip(discord_button, "Coming Soon")
+        button_row.addWidget(discord_button)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+        return card
+
+    def on_auto_update_toggled(self, checked):
+        self.update_config = UpdateManager.from_settings(self.settings).config
+        update_settings = dict(self.settings.get("updates") if isinstance(self.settings.get("updates"), dict) else {})
+        update_settings.update(self.update_config.to_dict())
+        update_settings["auto_update_enabled"] = bool(checked)
+        self.settings["updates"] = update_settings
+        self.update_manager = UpdateManager.from_settings(self.settings)
+        self.update_config = self.update_manager.config
+        save_json(SETTINGS_FILE, self.settings)
+        state_text = "enabled" if checked else "disabled"
+        self.set_update_status(f"Auto Update {state_text}.")
+        self.append_log(f"[Updates] Auto Update {state_text}")
+
+    def open_mailto_url(self, url):
+        if not QDesktopServices.openUrl(QUrl(url)):
+            self.append_log("[Support] Failed to open default mail app")
+            QMessageBox.warning(self, self.localize("Technical Support"), "Could not open the default mail app.")
+            return False
+        return True
+
+    def current_support_log_attachment(self):
+        report = pending_crash_report()
+        if report and report.get("path"):
+            crash_path = Path(report.get("path"))
+            if crash_path.exists() and crash_path.is_file():
+                return str(crash_path)
+        return ""
+
+    def show_manual_attachment_fallback(self):
+        self.open_logs_folder()
+        QMessageBox.information(
+            self,
+            self.localize("Technical Support"),
+            "Your mail app does not support automatic attachments. Please attach the crash log manually.",
+        )
+
+    def open_support_email(self):
+        attachment_path = self.current_support_log_attachment()
+        if create_support_outlook_draft(attachment_path=attachment_path or None):
+            if attachment_path:
+                self.append_log("[Support] Support email draft opened with redacted log attachment")
+            else:
+                self.append_log("[Support] Support email draft opened")
+            return
+
+        if self.open_mailto_url(support_mailto_url(attachment_path or None)):
+            self.append_log("[Support] Support email draft opened")
+            if attachment_path:
+                self.show_manual_attachment_fallback()
+
+    def open_crash_report_email(self, crash_path):
+        if create_crash_outlook_draft(crash_path):
+            self.append_log("[Support] Crash report email draft opened with redacted log attachment")
+            return True
+
+        if self.open_mailto_url(crash_mailto_url(crash_path)):
+            self.append_log("[Support] Crash report email draft opened")
+            self.show_manual_attachment_fallback()
+            return True
+        return False
+
+    def open_logs_folder(self):
+        logs_dir = ensure_logs_dir()
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(logs_dir))):
+            self.append_log(f"[Support] Failed to open logs folder: {logs_dir}")
+            QMessageBox.warning(self, self.localize("Technical Support"), f"Could not open logs folder:\n{logs_dir}")
+            return
+        self.append_log(f"[Support] Logs folder opened: {logs_dir}")
+
+    def copy_diagnostic_info(self):
+        QApplication.clipboard().setText(diagnostic_summary())
+        self.append_log("[Support] Diagnostic info copied")
+
+    def show_pending_crash_dialog(self):
+        report = pending_crash_report()
+        if not report:
+            return
+        crash_path = report.get("path", "")
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(self.localize("Technical Support"))
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setText(
+            "1SalemBOT detected a crash from the previous session.\n\n"
+            "You can open a support email draft, open the logs folder, or dismiss this notice."
+        )
+        send_button = dialog.addButton(self.localize("Send Crash Report"), QMessageBox.AcceptRole)
+        logs_button = dialog.addButton(self.localize("Open Logs Folder"), QMessageBox.ActionRole)
+        dismiss_button = dialog.addButton(self.localize("Dismiss"), QMessageBox.RejectRole)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is send_button:
+            self.open_crash_report_email(crash_path)
+        elif clicked is logs_button:
+            self.open_logs_folder()
+        elif clicked is dismiss_button:
+            clear_pending_crash_report()
+            self.append_log("[Support] Crash report dismissed")
+
+    def sync_auto_restart_startup_checkbox(self):
+        checkbox = getattr(self, "auto_restart_startup_checkbox", None)
+        if checkbox is None:
+            return
+        checkbox.blockSignals(True)
+        checkbox.setChecked(bool(self.auto_restart_bot_on_startup))
+        checkbox.blockSignals(False)
+
+    def on_auto_restart_startup_toggled(self, checked):
+        self.auto_restart_bot_on_startup = bool(checked)
+        self.settings["auto_restart_bot_on_startup"] = bool(checked)
+        save_json(SETTINGS_FILE, self.settings)
+        state_text = "enabled" if checked else "disabled"
+        self.append_log(f"[BOOT] Auto Restart Bot on Startup {state_text}")
+
+    def set_update_status(self, text, progress=None):
+        if hasattr(self, "update_status_value"):
+            self.set_dynamic_text(self.update_status_value, text)
+        if progress is not None and hasattr(self, "update_progress_bar"):
+            self.update_progress_bar.setVisible(True)
+            self.update_progress_bar.setValue(max(0, min(100, int(progress))))
+    def friendly_update_error(self, error):
+        text = str(error or "").strip()
+        lowered = text.lower()
+        if "no internet" in lowered or "urlopen error" in lowered or "failed to reach" in lowered:
+            return "No internet connection or GitHub update source unavailable. Please try again later."
+        if "invalid update json" in lowered or "invalid json" in lowered:
+            return "Invalid update information was received. Please try again later."
+        if "checksum" in lowered:
+            return "Checksum mismatch. The downloaded installer could not be verified."
+        if "failed to start installer" in lowered or "downloaded installer was not found" in lowered:
+            return "Installer failed to start. Please download the installer manually from GitHub Releases."
+        return text or "Update failed. Please try again later."
+
+    def sync_update_controls(self):
+        checking = bool(getattr(self, "update_check_inflight", False))
+        downloading = bool(getattr(self, "update_download_inflight", False))
+        installing = bool(getattr(self, "update_install_inflight", False) or getattr(self, "installing_update", False))
+        if hasattr(self, "check_updates_button"):
+            self.check_updates_button.setEnabled(not checking and not downloading and not installing)
+        if hasattr(self, "cancel_update_button"):
+            self.cancel_update_button.setEnabled(downloading and not installing)
+        if hasattr(self, "auto_update_checkbox"):
+            self.auto_update_checkbox.setEnabled(not downloading and not installing)
+
+    def check_for_updates(self, auto=False):
+        if self.update_check_inflight or self.update_download_inflight:
+            self.set_update_status("Update check already running.")
+            return
+        self.update_manager = UpdateManager.from_settings(self.settings)
+        self.update_config = self.update_manager.config
+        self.update_check_inflight = True
+        self.sync_update_controls()
+        self.set_update_status("Checking for updates...", 0)
+        self.append_log("[Updates] Checking GitHub for updates")
+
+        def worker():
+            try:
+                result = self.update_manager.check_for_updates()
+                result["auto"] = bool(auto)
+                self.bridge.update_check_result_signal.emit(result)
+            except Exception as exc:
+                self.bridge.update_check_result_signal.emit({"error": str(exc), "auto": bool(auto)})
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def apply_update_status_payload(self, payload):
+        if isinstance(payload, dict):
+            self.set_update_status(payload.get("text") or "", payload.get("progress"))
+        else:
+            self.set_update_status(str(payload or ""))
+
+    def handle_update_check_result(self, payload):
+        self.update_check_inflight = False
+        self.sync_update_controls()
+        if not isinstance(payload, dict):
+            payload = {"error": "Invalid update result."}
+        if payload.get("error"):
+            friendly_error = self.friendly_update_error(payload.get("error"))
+            self.set_update_status(f"Update check failed: {friendly_error}")
+            self.append_log(f"[Updates] Check failed: {friendly_error}")
+            if not payload.get("auto"):
+                QMessageBox.warning(self, self.localize("Updates"), friendly_error)
+            return
+
+        release = payload.get("release")
+        installer_asset = payload.get("installer_asset")
+        if not payload.get("applicable"):
+            self.set_update_status("No applicable update found for this release channel.")
+            self.append_log("[Updates] No applicable update found")
+            return
+        if not payload.get("is_newer"):
+            version = getattr(release, "version", APP_VERSION)
+            self.set_update_status(f"Already up to date. Current version: {APP_VERSION}. Latest version: {version}.")
+            self.append_log(f"[Updates] Already up to date ({APP_VERSION})")
+            return
+        if installer_asset is None:
+            self.set_update_status("Update available, but no Windows installer asset was provided.")
+            self.append_log("[Updates] Update available but installer asset is missing")
+            QMessageBox.warning(self, self.localize("Updates"), "Update available, but no Windows installer asset was provided.")
+            return
+
+        self.pending_update_release = release
+        self.pending_update_asset = installer_asset
+        self.set_update_status(f"Update found: v{getattr(release, 'version', '')}", 100)
+        self.append_log(f"[Updates] Update found: v{getattr(release, 'version', '')}")
+        self.show_update_available_dialog(release, installer_asset, auto=bool(payload.get("auto")))
+
+    def show_update_available_dialog(self, release, installer_asset, auto=False):
+        version = getattr(release, "version", "")
+        notes = "\n".join(getattr(release, "notes_lines", [])[:8])
+        message = f"Version {version} is available.\n\nCurrent version: {APP_VERSION}"
+        if notes:
+            message += f"\n\nRelease notes:\n{notes}"
+        message += "\n\nDownload and run the installer now?"
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(self.localize("Update Available"))
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setText(message)
+        update_button = dialog.addButton(self.localize("Update Now"), QMessageBox.AcceptRole)
+        dialog.addButton(self.localize("Cancel"), QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is update_button:
+            silent = bool(getattr(self, "auto_update_checkbox", None) and self.auto_update_checkbox.isChecked())
+            self.start_update_download(release, installer_asset, silent=silent)
+        else:
+            self.set_update_status("Update cancelled by user.")
+            self.append_log("[Updates] Update cancelled by user")
+
+    def start_update_download(self, release, installer_asset, silent=False):
+        if self.update_download_inflight:
+            return
+        self.update_download_inflight = True
+        self.update_install_inflight = False
+        self.update_cancel_event = threading.Event()
+        self.sync_update_controls()
+        self.set_update_status("Downloading update... 0%", 0)
+        self.append_log(f"[Updates] Downloading installer for version {getattr(release, 'version', '')}")
+
+        def progress(downloaded, total):
+            percent = 0
+            if total:
+                percent = int((downloaded / total) * 100)
+            self.bridge.update_progress_signal.emit(
+                {
+                    "downloaded": downloaded,
+                    "total": total,
+                    "progress": percent,
+                    "text": f"Downloading update... {percent}%" if total else f"Downloading update... {downloaded // 1024} KB",
+                }
+            )
+
+        def worker():
+            try:
+                path = self.update_manager.download_installer(
+                    installer_asset,
+                    progress_callback=progress,
+                    cancel_event=self.update_cancel_event,
+                    status_callback=lambda text, progress_value=None: self.bridge.update_status_signal.emit(
+                        {"text": text, "progress": progress_value}
+                    ),
+                )
+                self.bridge.update_download_result_signal.emit(
+                    {
+                        "path": path,
+                        "release": release,
+                        "asset": installer_asset,
+                        "silent": bool(silent),
+                    }
+                )
+            except UpdateCancelled as exc:
+                self.bridge.update_download_result_signal.emit({"cancelled": True, "error": str(exc)})
+            except Exception as exc:
+                self.bridge.update_download_result_signal.emit({"error": str(exc)})
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def handle_update_progress_payload(self, payload):
+        if not isinstance(payload, dict):
+            return
+        self.set_update_status(payload.get("text") or "Downloading update...", payload.get("progress"))
+
+    def cancel_update_download(self):
+        if self.update_cancel_event is not None:
+            self.update_cancel_event.set()
+            self.set_update_status("Cancelling update download.")
+            self.append_log("[Updates] Download cancellation requested")
+
+    def handle_update_download_result(self, payload):
+        self.update_download_inflight = False
+        self.sync_update_controls()
+        if not isinstance(payload, dict):
+            payload = {"error": "Invalid download result."}
+        if payload.get("cancelled"):
+            if hasattr(self, "update_progress_bar"):
+                self.update_progress_bar.setVisible(False)
+                self.update_progress_bar.setValue(0)
+            self.set_update_status("Update download cancelled.")
+            self.append_log("[Updates] Download cancelled")
+            return
+        if payload.get("error"):
+            if hasattr(self, "update_progress_bar"):
+                self.update_progress_bar.setVisible(False)
+                self.update_progress_bar.setValue(0)
+            friendly_error = self.friendly_update_error(payload.get("error"))
+            self.set_update_status(f"Update download failed: {friendly_error}")
+            self.append_log(f"[Updates] Download failed: {friendly_error}")
+            QMessageBox.warning(self, self.localize("Updates"), friendly_error)
+            return
+        self.set_update_status("Preparing installer...", 100)
+        self.install_downloaded_update(payload)
+
+    def install_downloaded_update(self, payload):
+        installer_path = payload.get("path")
+        asset = payload.get("asset")
+        silent = bool(payload.get("silent"))
+        self.update_install_inflight = True
+        self.sync_update_controls()
+        self.set_update_status("Installing update...", 100)
+        try:
+            args = self.update_manager.launch_installer_after_exit(
+                installer_path,
+                os.getpid(),
+                silent=silent,
+                asset=asset,
+            )
+        except Exception as exc:
+            self.update_install_inflight = False
+            self.sync_update_controls()
+            friendly_error = self.friendly_update_error(f"Failed to start installer: {exc}")
+            self.set_update_status(f"Failed to start installer: {friendly_error}")
+            self.append_log(f"[Updates] Failed to start installer: {friendly_error}")
+            QMessageBox.warning(self, self.localize("Updates"), friendly_error)
+            return
+        mode = "silent" if args else "interactive"
+        self.installing_update = True
+        self.set_update_status("Closing app to apply update...", 100)
+        self.append_log(f"[Updates] Installer queued in {mode} mode. Closing app.")
+        QTimer.singleShot(500, self.close)
 
     def sync_scroll_html(self, widget: QTextEdit, new_html: str):
         scrollbar = widget.verticalScrollBar()
@@ -2020,9 +2542,11 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             "bot_login": self.settings_bot_login.text().strip() or self.bot_login_entry.text().strip(),
             "channel_login": self.settings_channel_login.text().strip() or self.channel_login_entry.text().strip(),
             "triggers": ",".join(self.trigger_list),
-            "viewer_sort": getattr(self, "viewer_sort_key", "newest"),
+            "viewer_sort": getattr(self, "viewer_sort_key", "messages"),
             "relationship_sort": getattr(self, "relationship_sort_key", "newest"),
             "music_enabled": bool(self.music_enabled),
+            "prevent_duplicate_tracks": bool(self.prevent_duplicate_tracks),
+            "auto_restart_bot_on_startup": bool(self.auto_restart_bot_on_startup),
             "audio_volume": int(self.audio_volume),
             "audio_muted": bool(self.audio_muted),
             "openai_api_key": self.openai_key_entry.text().strip(),
@@ -2351,9 +2875,57 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             self.set_status(False)
 
     def restart_bot(self):
-        self.append_log("[BOT] Restart requested")
+        self.request_bot_restart(source="manual")
+
+    def request_bot_restart(self, source="manual"):
+        if self.restart_in_progress:
+            if source == "startup":
+                self.append_log("[BOOT] Automatic startup restart ignored because another restart is already running.")
+            else:
+                self.append_log("[BOT] Manual restart ignored because another restart is already running.")
+            return False
+
+        self.restart_in_progress = True
+        if source == "startup":
+            self.append_log("[BOOT] Automatic startup restart triggered.")
+        else:
+            self.append_log("[BOT] Manual restart requested.")
+
         self.stop_bot()
-        QTimer.singleShot(700, self.start_bot)
+        self.schedule_restart_start(source)
+        return True
+
+    def schedule_restart_start(self, source):
+        QTimer.singleShot(700, lambda: self.complete_bot_restart(source))
+
+    def complete_bot_restart(self, source):
+        try:
+            self.start_bot()
+        finally:
+            self.restart_in_progress = False
+            if source == "startup":
+                self.append_log("[BOOT] Automatic startup restart completed.")
+            else:
+                self.append_log("[BOT] Manual restart completed.")
+
+    def schedule_startup_auto_restart(self):
+        if not bool(getattr(self, "auto_restart_bot_on_startup", True)):
+            self.append_log("[BOOT] Automatic startup restart disabled in settings.")
+            return
+        if self.startup_auto_restart_scheduled or self.startup_auto_restart_ran:
+            return
+        self.startup_auto_restart_scheduled = True
+        self.append_log("[BOOT] Waiting 3 seconds before automatic startup restart...")
+        self.schedule_startup_auto_restart_timer()
+
+    def schedule_startup_auto_restart_timer(self):
+        QTimer.singleShot(3000, self.run_startup_auto_restart)
+
+    def run_startup_auto_restart(self):
+        if self.startup_auto_restart_ran:
+            return
+        self.startup_auto_restart_ran = True
+        self.request_bot_restart(source="startup")
 
     def poll_bot_process(self):
         if self.process is not None:
@@ -2872,11 +3444,21 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         account_layout.addWidget(self.make_title("Bot Setup"))
 
         self.settings_bot_login = self.make_labeled_entry(account_layout, "Bot Login")
+        self.settings_bot_login.setReadOnly(True)
+        self.settings_bot_login.setProperty("readOnlyDisplay", "true")
+        self.settings_bot_login.setPlaceholderText("Bot account not connected")
+        self.apply_input_control_style(self.settings_bot_login)
+
         self.settings_channel_login = self.make_labeled_entry(account_layout, "Channel Login")
+        self.settings_channel_login.setReadOnly(True)
+        self.settings_channel_login.setProperty("readOnlyDisplay", "true")
+        self.settings_channel_login.setPlaceholderText("Channel account not connected")
+        self.apply_input_control_style(self.settings_channel_login)
 
         account_layout.addWidget(self.make_small_title("Trigger Input"))
         self.trigger_input = QLineEdit()
-        self.trigger_input.setPlaceholderText("اكتب Trigger واضغط Enter")
+        self.trigger_input.setPlaceholderText("Type a trigger and press Enter")
+        self.apply_input_control_style(self.trigger_input)
         self.trigger_input.returnPressed.connect(self.add_trigger_from_input)
         account_layout.addWidget(self.trigger_input)
 
@@ -2891,12 +3473,15 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         body_layout.addWidget(self.build_ai_settings_card())
         body_layout.addWidget(self.build_runtime_controls_card())
         body_layout.addWidget(self.build_update_settings_card())
+        body_layout.addWidget(self.build_technical_support_card())
         body_layout.addStretch()
         layout.addWidget(self.make_scroll_container(body))
         return page
 
     def build_ui(self):
         central = QWidget()
+        central.setObjectName("appRoot")
+        central.setAttribute(Qt.WA_StyledBackground, True)
         self.setCentralWidget(central)
 
         root = QHBoxLayout(central)
@@ -2979,6 +3564,8 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         main_layout.setSpacing(16)
 
         self.stack = QStackedWidget()
+        self.stack.setObjectName("mainStack")
+        self.stack.setAttribute(Qt.WA_StyledBackground, True)
         pages = [
             self.build_dashboard_page(),
             self.build_chat_page(),
@@ -3015,6 +3602,8 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
 
         for widget in self.findChildren(SidebarButton):
             widget.apply_theme(self.theme)
+        for widget in self.findChildren(ActionButton):
+            widget.apply_theme(self.theme)
         for widget in self.findChildren(Card):
             widget.apply_theme(self.theme)
         for widget in self.findChildren(ThumbnailWidget):
@@ -3025,13 +3614,22 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             widget.apply_theme(self.theme)
         for widget in self.findChildren(StatusDot):
             widget.apply_theme(self.theme)
+        for widget in self.findChildren(ThemedCheckBox):
+            widget.apply_theme(self.theme)
         for widget in self.findChildren(TriggerChipWidget):
             widget.apply_theme(self.theme)
-
+        for widget in [getattr(self, "queue_listbox", None), getattr(self, "music_page_queue", None)]:
+            self.apply_queue_widget_style(widget)
+        for widget in self.findChildren(QComboBox):
+            self.apply_combo_popup_style(widget)
+        for widget_class in (QLineEdit, QPlainTextEdit):
+            for widget in self.findChildren(widget_class):
+                self.apply_input_control_style(widget)
         for widget in [
             getattr(self, "sidebar", None),
             getattr(self, "brand_card", None),
             getattr(self, "main_area", None),
+            getattr(self, "stack", None),
             getattr(self, "trigger_chips_frame", None),
             getattr(self, "sidebar_accounts_card", None),
         ]:
@@ -3112,7 +3710,9 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.sync_language_selector()
 
         self.music_enabled = bool(self.settings.get("music_enabled", True))
-        self.viewer_sort_key = str(self.settings.get("viewer_sort", "newest") or "newest")
+        self.prevent_duplicate_tracks = bool(self.settings.get("prevent_duplicate_tracks", True))
+        self.auto_restart_bot_on_startup = bool(self.settings.get("auto_restart_bot_on_startup", True))
+        self.viewer_sort_key = str(self.settings.get("viewer_sort", "messages") or "messages")
         self.relationship_sort_key = str(self.settings.get("relationship_sort", "newest") or "newest")
         self.alert_feed_filter = str(self.settings.get("alert_feed_filter", DEFAULT_ALERT_FEED_FILTER) or DEFAULT_ALERT_FEED_FILTER)
         self.log_retention_minutes = self.resolve_log_retention_minutes(
@@ -3121,6 +3721,8 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.audio_volume = max(0, min(100, int(self.settings.get("audio_volume", self.audio_volume))))
         self.audio_muted = bool(self.settings.get("audio_muted", self.audio_muted))
         self.sync_music_toggle_buttons()
+        self.sync_prevent_duplicate_checkboxes()
+        self.sync_auto_restart_startup_checkbox()
         self.sync_volume_controls()
         if hasattr(self, "viewer_sort_selector"):
             selector_index = self.viewer_sort_selector.findData(self.viewer_sort_key)
@@ -3156,10 +3758,14 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         if existing_alert_runtime.get("pid"):
             self.append_log(f"[ALERTS] Existing alerts listener detected (PID {existing_alert_runtime.get('pid')})")
         self.ensure_alerts_listener()
+        self.schedule_startup_auto_restart()
         self.refresh_dashboard()
         self.refresh_token_status()
         self.refresh_account_widget()
         self.request_auth_health_check(force=True)
+        QTimer.singleShot(1200, self.show_pending_crash_dialog)
+        if self.update_config.auto_update_enabled:
+            QTimer.singleShot(3500, lambda: self.check_for_updates(auto=True))
 
     def start_timers(self):
         self.timer_dashboard = QTimer(self)

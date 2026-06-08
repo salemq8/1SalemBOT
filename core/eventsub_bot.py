@@ -41,7 +41,12 @@ from .chat_storage import (
     save_user_profiles,
     sync_dashboard_day,
 )
-from .music_commands import parse_music_command, write_music_command
+from .music_commands import (
+    looks_like_implicit_music_text,
+    parse_bot_addressed_music_request,
+    parse_music_command,
+    write_music_command,
+)
 from .runtime_env import configure_ssl_cert_env
 from .twitch_api import get_user_by_login, is_user_moderator, send_chat_message
 from .twitch_eventsub import TwitchEventSubClient
@@ -55,6 +60,7 @@ except Exception:
 
 LISTENERS = []
 ALERT_SCOPE_REQUIREMENTS = ALERT_EVENT_SCOPE_REQUIREMENTS
+MAX_VIEWER_MESSAGE_DEDUPE_IDS = 5000
 
 
 def safe_print(*args):
@@ -291,6 +297,47 @@ def load_settings():
     return load_json(SETTINGS_FILE, {})
 
 
+def get_configured_music_command_aliases():
+    settings = load_json(SETTINGS_FILE, {})
+    aliases = []
+    for key in ("music_command", "songrequest_command", "song_request_command", "music_request_command"):
+        value = settings.get(key)
+        if isinstance(value, str) and value.strip():
+            aliases.append(value.strip())
+        elif isinstance(value, (list, tuple)):
+            aliases.extend(str(item).strip() for item in value if str(item).strip())
+    return aliases
+
+
+def _starts_with_token(text, token):
+    lowered = text.lower()
+    candidate = token.lower().strip()
+    return lowered == candidate or lowered.startswith(f"{candidate} ")
+
+
+def find_bot_address_trigger(bot_login, text):
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+
+    bot_name = str(bot_login or "").strip().lower().lstrip("@")
+    candidates = ["يا بوت", "بوت"]
+    if bot_name:
+        candidates.extend(
+            [
+                f"يا @{bot_name}",
+                f"يا {bot_name}",
+                f"@{bot_name}",
+                bot_name,
+            ]
+        )
+
+    for candidate in sorted({item for item in candidates if item}, key=len, reverse=True):
+        if _starts_with_token(stripped, candidate):
+            return stripped[: len(candidate)]
+    return None
+
+
 def extract_twitch_badges(event):
     extracted = []
     for badge in event.get("badges", []) or []:
@@ -364,9 +411,10 @@ Do not invent personal facts.
         return old_notes
 
 
-def update_user_profile(ai_client, user_profiles, username, message):
+def update_user_profile(ai_client, user_profiles, username, message, *, count_message=True):
     profile = get_user_profile(user_profiles, username)
-    profile["messages"] += 1
+    if count_message:
+        profile["messages"] = int(profile.get("messages", 0) or 0) + 1
     profile["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     lowered = message.lower()
@@ -385,8 +433,71 @@ def update_user_profile(ai_client, user_profiles, username, message):
     return profile
 
 
-def find_trigger(bot_login, triggers, text):
+def normalize_viewer_message_id(message_id):
+    return str(message_id or "").strip()
+
+
+def remember_viewer_message_id(seen_message_ids, seen_message_order, dedupe_key):
+    if seen_message_ids is None or seen_message_order is None or not dedupe_key:
+        return
+    seen_message_ids.add(dedupe_key)
+    seen_message_order.append(dedupe_key)
+    overflow = len(seen_message_order) - MAX_VIEWER_MESSAGE_DEDUPE_IDS
+    if overflow <= 0:
+        return
+    for stale_key in seen_message_order[:overflow]:
+        seen_message_ids.discard(stale_key)
+    del seen_message_order[:overflow]
+
+
+def count_viewer_message(
+    user_profiles,
+    username,
+    *,
+    bot_login="",
+    text="",
+    message_id=None,
+    platform="twitch",
+    seen_message_ids=None,
+    seen_message_order=None,
+    log=None,
+):
+    if log is None:
+        log = safe_print
+
+    username = str(username or "").strip()
+    if not username:
+        return False
+    if bot_login and username.lower() == str(bot_login).strip().lower():
+        return False
+
+    normalized_message_id = normalize_viewer_message_id(message_id)
+    dedupe_key = f"{platform}:{username.lower()}:{normalized_message_id}" if normalized_message_id else ""
+    if dedupe_key and seen_message_ids is not None and dedupe_key in seen_message_ids:
+        if callable(log):
+            log(f"[VIEWERS] Ignored duplicate message from {username}")
+        return False
+
+    profile = get_user_profile(user_profiles, username)
+    profile["messages"] = int(profile.get("messages", 0) or 0) + 1
+    profile["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if str(text or "").strip():
+        profile["last_message"] = str(text)
+    user_profiles[username] = profile
+    save_user_profiles(user_profiles)
+
+    remember_viewer_message_id(seen_message_ids, seen_message_order, dedupe_key)
+    if callable(log):
+        log(f"[VIEWERS] Counted message from {username}")
+    return True
+
+
+def find_trigger(bot_login, triggers, text, music_command_aliases=None):
     lowered = text.strip().lower()
+    bot_address_trigger = find_bot_address_trigger(bot_login, text)
+    if bot_address_trigger:
+        return bot_address_trigger
+
     for trigger in triggers:
         if lowered.startswith(trigger):
             return trigger
@@ -395,21 +506,48 @@ def find_trigger(bot_login, triggers, text):
     if mention in lowered:
         return mention
 
-    music_action, _ = parse_music_command(text)
+    music_action, _ = parse_music_command(text, extra_play_commands=music_command_aliases)
     if music_action:
         return "command"
 
     return None
 
 
+def is_bot_address_trigger(bot_login, trigger):
+    marker = str(trigger or "").strip().lower()
+    if not marker:
+        return False
+
+    bot_name = str(bot_login or "").strip().lower().lstrip("@")
+    address_markers = {"bot", "يا bot", "بوت", "يا بوت"}
+    if bot_name:
+        address_markers.update({bot_name, f"@{bot_name}", f"يا {bot_name}", f"يا @{bot_name}"})
+    return marker in address_markers
+
+
+def parse_chat_music_request(bot_login, trigger, cleaned_text, music_command_aliases=None):
+    command_action, command_query = parse_music_command(
+        cleaned_text,
+        extra_play_commands=music_command_aliases,
+    )
+    if command_action:
+        return command_action, command_query
+
+    if is_bot_address_trigger(bot_login, trigger):
+        return parse_bot_addressed_music_request(cleaned_text)
+
+    return None, ""
+
+
 def remove_trigger(bot_login, text, trigger):
     stripped = text.strip()
     lowered = stripped.lower()
+    lowered_trigger = str(trigger or "").lower()
 
     if trigger == "command":
         return stripped
 
-    if lowered.startswith(trigger):
+    if lowered_trigger and lowered.startswith(lowered_trigger):
         return stripped[len(trigger) :].strip()
 
     mention = f"@{bot_login.lower()}"
@@ -514,6 +652,9 @@ def send_twitch_reply(token, channel_user_id, bot_user_id, reply, username, clea
 
 
 def create_message_handler(platform, bot_login, triggers, ai_client, user_profiles, dashboard_state, system_prompt, send_reply):
+    seen_viewer_message_ids = set()
+    seen_viewer_message_order = []
+
     def update_dashboard_for_message(username, text, *, display_name=None, badges=None, fragments=None):
         sync_dashboard_day(dashboard_state)
         dashboard_state["messages_today"] += 1
@@ -538,6 +679,18 @@ def create_message_handler(platform, bot_login, triggers, ai_client, user_profil
                 safe_print(f"[{platform.upper()} CHAT] Ignored event due to empty message or self-message")
                 return
 
+            if not count_viewer_message(
+                user_profiles,
+                chatter_name,
+                bot_login=bot_login,
+                text=text,
+                message_id=message_id,
+                platform=platform,
+                seen_message_ids=seen_viewer_message_ids,
+                seen_message_order=seen_viewer_message_order,
+            ):
+                return
+
             update_dashboard_for_message(
                 chatter_name,
                 text,
@@ -546,8 +699,14 @@ def create_message_handler(platform, bot_login, triggers, ai_client, user_profil
                 fragments=fragments,
             )
 
-            trigger = find_trigger(bot_login, triggers, text)
+            music_command_aliases = get_configured_music_command_aliases()
+            trigger = find_trigger(bot_login, triggers, text, music_command_aliases=music_command_aliases)
             if not trigger:
+                if looks_like_implicit_music_text(text):
+                    safe_print(
+                        f"[{platform.upper()} CHAT] Ignored normal chat message for music: "
+                        "explicit command required"
+                    )
                 safe_print(f"[{platform.upper()} CHAT] No trigger matched for '{text}'")
                 return
 
@@ -555,7 +714,12 @@ def create_message_handler(platform, bot_login, triggers, ai_client, user_profil
             cleaned_text = remove_trigger(bot_login, text, trigger)
             safe_print(f"[{platform.upper()} CHAT] Cleaned text: {cleaned_text}")
 
-            command_action, command_query = parse_music_command(cleaned_text)
+            command_action, command_query = parse_chat_music_request(
+                bot_login,
+                trigger,
+                cleaned_text,
+                music_command_aliases=music_command_aliases,
+            )
             if command_action in {"play", "skip", "stop"}:
                 safe_print(f"[{platform.upper()} CHAT] Music command detected: {command_action} {command_query}")
                 dashboard_state["commands_used"] += 1
@@ -604,6 +768,12 @@ def create_message_handler(platform, bot_login, triggers, ai_client, user_profil
                 send_reply(reply, chatter_name, cleaned_text, message_id=message_id)
                 return
 
+            if looks_like_implicit_music_text(cleaned_text):
+                safe_print(
+                    f"[{platform.upper()} CHAT] Ignored normal chat message for music: "
+                    "explicit command required"
+                )
+
             dashboard_state["commands_used"] += 1
             record_dashboard_metric(dashboard_state, "commands")
             increment_top_command(dashboard_state, "mention" if not cleaned_text.strip() else "reply")
@@ -615,7 +785,7 @@ def create_message_handler(platform, bot_login, triggers, ai_client, user_profil
                 return
 
             safe_print(f"[{platform.upper()} PROFILE] Updating profile for {chatter_name}")
-            profile = update_user_profile(ai_client, user_profiles, chatter_name, cleaned_text)
+            profile = update_user_profile(ai_client, user_profiles, chatter_name, cleaned_text, count_message=False)
             safe_print(
                 f"[{platform.upper()} PROFILE] Profile ready for {chatter_name}: "
                 f"messages={profile.get('messages', 0)} behavior={profile.get('behavior', '')}"
@@ -782,6 +952,7 @@ def start_twitch_listener(settings, ai_client, user_profiles, dashboard_state, t
             display_name=event.get("chatter_user_name") or event.get("chatter_user_login", ""),
             badges=extract_twitch_badges(event),
             fragments=extract_twitch_fragments(event),
+            message_id=event.get("message_id") or event.get("_eventsub_message_id") or event.get("id"),
         )
 
     def on_alert_event(subscription_type, event, metadata):

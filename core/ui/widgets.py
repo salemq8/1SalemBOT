@@ -1,6 +1,6 @@
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget
 
 from .constants import THUMBNAIL_PLACEHOLDER
 from .localization import DEFAULT_LANGUAGE, is_rtl_language, translate_text
@@ -17,6 +17,12 @@ class Bridge(QObject):
     stream_summary_signal = Signal(object)
     viewer_relationships_signal = Signal(object)
     auth_health_signal = Signal(object)
+    update_status_signal = Signal(object)
+    update_check_result_signal = Signal(object)
+    update_progress_signal = Signal(object)
+    update_download_result_signal = Signal(object)
+    music_playlist_signal = Signal(object)
+    music_track_request_signal = Signal(object)
 
 
 class ThumbnailWidget(QWidget):
@@ -133,7 +139,7 @@ class SidebarButton(QPushButton):
                 color: {theme.text_primary};
             }}
             QPushButton:checked {{
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {theme.nav_active_bg}, stop:1 {theme.accent_soft});
+                background: {theme.nav_active_bg};
                 border-color: {theme.nav_active_border};
                 color: {theme.nav_active_text};
                 padding: {checked_padding};
@@ -147,11 +153,145 @@ class SidebarButton(QPushButton):
         self.apply_theme(self.theme)
 
 
+class ActionButton(QPushButton):
+    """Filled dashboard action button that does not rely on app-level QSS selectors."""
+
+    def __init__(self, text="", role="muted", theme=None, parent=None):
+        super().__init__(text, parent)
+        self.role = role or "muted"
+        self.theme = theme or THEMES[DEFAULT_THEME_NAME]
+        self.setCursor(Qt.PointingHandCursor)
+        self.setProperty("buttonRole", self.role)
+        self.setProperty("styledActionButton", True)
+        self.setFlat(False)
+        self.setAutoDefault(False)
+        self.setDefault(False)
+        self.setMinimumHeight(38)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.apply_theme(self.theme)
+
+    def set_role(self, role):
+        self.role = role or "muted"
+        self.setProperty("buttonRole", self.role)
+        self.apply_theme(self.theme)
+
+    def apply_theme(self, theme):
+        self.theme = theme or THEMES[DEFAULT_THEME_NAME]
+        colors = self.theme.button_colors(self.role)
+        disabled_bg = self.theme.elevated_card_background
+        disabled_border = self.theme.border_color
+        self.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: {colors.background};
+                color: {colors.text};
+                border: 1px solid {colors.border};
+                border-radius: 12px;
+                padding: 10px 16px;
+                min-height: 18px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QPushButton:hover {{
+                background-color: {colors.hover};
+                border-color: {self.theme.accent_border};
+            }}
+            QPushButton:pressed {{
+                background-color: {colors.hover};
+                padding-top: 11px;
+                padding-bottom: 9px;
+            }}
+            QPushButton:disabled {{
+                background-color: {disabled_bg};
+                color: {self.theme.text_muted};
+                border-color: {disabled_border};
+            }}
+            """
+        )
+
+
+class ThemedCheckBox(QCheckBox):
+    """Compact painted checkbox so checked/unchecked states stay visible under app QSS."""
+
+    def __init__(self, text="", theme=None, parent=None):
+        super().__init__(text, parent)
+        self.theme = theme or THEMES[DEFAULT_THEME_NAME]
+        self._hovered = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setStyleSheet("QCheckBox { background: transparent; border: none; }")
+        self.apply_theme(self.theme)
+
+    def apply_theme(self, theme):
+        self.theme = theme or THEMES[DEFAULT_THEME_NAME]
+        self.update()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def sizeHint(self):
+        metrics = self.fontMetrics()
+        text_width = metrics.horizontalAdvance(self.text())
+        return QSize(max(34, 18 + 9 + text_width), max(24, metrics.height() + 8))
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+        indicator_size = 18
+        spacing = 9
+        is_rtl = self.layoutDirection() == Qt.RightToLeft
+        indicator_x = self.width() - indicator_size if is_rtl else 0
+        indicator_y = (self.height() - indicator_size) / 2
+        indicator_rect = QRectF(indicator_x, indicator_y, indicator_size, indicator_size)
+
+        if self.isEnabled():
+            bg = QColor(self.theme.accent if self.isChecked() else self.theme.input_bg)
+            border = QColor(self.theme.accent_border if (self.isChecked() or self._hovered) else self.theme.border_color)
+            text_color = QColor(self.theme.text_primary if self.isChecked() else self.theme.text_secondary)
+        else:
+            bg = QColor(self.theme.elevated_card_background)
+            border = QColor(self.theme.border_color)
+            text_color = QColor(self.theme.text_muted)
+
+        painter.setPen(QPen(border, 1.4))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(indicator_rect, 5, 5)
+
+        if self.isChecked():
+            check_pen = QPen(QColor(self.theme.text_inverse), 2.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(check_pen)
+            x = indicator_rect.left()
+            y = indicator_rect.top()
+            painter.drawLine(QPointF(x + 4.5, y + 9.4), QPointF(x + 7.6, y + 12.4))
+            painter.drawLine(QPointF(x + 7.6, y + 12.4), QPointF(x + 13.8, y + 5.8))
+
+        if is_rtl:
+            text_rect = QRectF(0, 0, max(0, indicator_x - spacing), self.height())
+            alignment = Qt.AlignRight | Qt.AlignVCenter
+        else:
+            text_rect = QRectF(indicator_size + spacing, 0, max(0, self.width() - indicator_size - spacing), self.height())
+            alignment = Qt.AlignLeft | Qt.AlignVCenter
+
+        painter.setPen(text_color)
+        painter.drawText(text_rect, alignment, self.text())
+        painter.end()
+
+
 class Card(QFrame):
     def __init__(self):
         super().__init__()
         self.setFrameShape(QFrame.NoFrame)
         self.setProperty("cardFrame", True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.theme = THEMES[DEFAULT_THEME_NAME]
         self.apply_theme(self.theme)
 
@@ -160,12 +300,19 @@ class Card(QFrame):
         self.setStyleSheet(
             f"""
             QFrame[cardFrame="true"] {{
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 {theme.card_bg}, stop:1 {theme.subtle_bg});
-                border: 1px solid {theme.card_border};
+                background: {theme.card_background};
+                border: 1px solid {theme.border_color};
                 border-radius: 18px;
             }}
             """
         )
+        shadow_color = QColor(theme.app_background)
+        shadow_color.setAlpha(115)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 8)
+        shadow.setColor(shadow_color)
+        self.setGraphicsEffect(shadow)
 
 
 class ChatLogBrowser(QTextBrowser):
@@ -221,7 +368,7 @@ class StatusDot(QWidget):
 
         base = self.COLOR_MAP.get(self.state, self.COLOR_MAP["disconnected"])
         badge_rect = QRectF(0, 0, self.width(), self.height())
-        badge_bg = QColor("#1f2937")
+        badge_bg = QColor(self.theme.elevated_card_background)
         badge_bg.setAlpha(205)
         painter.setBrush(badge_bg)
         painter.drawRoundedRect(badge_rect, 5, 5)
@@ -548,12 +695,12 @@ class AccountWidget(QFrame):
             self.avatar_label.setPixmap(avatar)
 
     def _apply_style(self):
-        background = self.theme.account_bg_hover if self._hovered else self.theme.account_bg
+        background = self.theme.elevated_card_background if self._hovered else self.theme.card_background
         self.setStyleSheet(
             f"""
             QFrame {{
                 background: {background};
-                border: 1px solid {self.theme.account_border};
+                border: 1px solid {self.theme.border_color};
                 border-radius: 14px;
             }}
             """
@@ -660,8 +807,8 @@ class SidebarAccountCard(QFrame):
         self.status_dot.raise_()
 
     def _apply_style(self):
-        background = self.theme.account_bg_hover if self._hovered else self.theme.account_bg
-        border = self.theme.account_border
+        background = self.theme.elevated_card_background if self._hovered else self.theme.card_background
+        border = self.theme.border_color
         self.setStyleSheet(
             f"""
             QFrame[sidebarAccountCard="true"] {{

@@ -1,5 +1,5 @@
 #define MyAppName "1SalemBOT"
-#define MyAppPublisher "1SalemBOT"
+#define MyAppPublisher "1SalemQ8"
 #define MyAppExeName "1SalemBOT.exe"
 #ifndef MyAppVersion
   #error MyAppVersion must be passed by build_shareable_release.ps1 from VERSION.
@@ -35,7 +35,11 @@ WizardResizable=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesInstallIn64BitMode=x64compatible
 VersionInfoVersion={#MyAppVersionInfo}
-VersionInfoDescription={#MyAppName} Setup v{#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName}
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#MyAppVersionInfo}
+VersionInfoCopyright={#MyAppPublisher}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
