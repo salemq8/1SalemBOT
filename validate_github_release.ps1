@@ -1,6 +1,8 @@
 param(
     [string]$Owner = "salemq8",
     [string]$Repo = "1SalemBOT",
+    [ValidateSet("Auto", "Beta", "Stable")]
+    [string]$Channel = "Auto",
     [switch]$SkipRemote
 )
 
@@ -8,6 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VersionFilePath = Join-Path $ProjectPath "VERSION"
+$VersionChannelFilePath = Join-Path $ProjectPath "VERSION_CHANNEL"
 if (-not (Test-Path -LiteralPath $VersionFilePath)) {
     throw "VERSION file not found at $VersionFilePath"
 }
@@ -17,9 +20,31 @@ if (-not $AppVersion) {
     throw "VERSION file is empty"
 }
 
+function Resolve-VersionChannel {
+    param([string]$RequestedChannel, [string]$ChannelFilePath)
+    $rawChannel = $RequestedChannel
+    if ($rawChannel -eq "Auto") {
+        if (Test-Path -LiteralPath $ChannelFilePath) {
+            $rawChannel = (Get-Content -LiteralPath $ChannelFilePath -Raw).Trim()
+        } else {
+            $rawChannel = "Stable"
+        }
+    }
+    switch -Regex ($rawChannel.ToLowerInvariant()) {
+        "^(beta|development|dev|local|testing)$" { return "Beta" }
+        "^(stable|release|public|production)$" { return "Stable" }
+        default { throw "Unsupported VERSION_CHANNEL value: $rawChannel" }
+    }
+}
+
+$ResolvedChannel = Resolve-VersionChannel -RequestedChannel $Channel -ChannelFilePath $VersionChannelFilePath
+$IsBeta = $ResolvedChannel -eq "Beta"
+$AppVersionLabel = if ($IsBeta) { "$AppVersion Beta" } else { $AppVersion }
+$AppVersionTag = if ($IsBeta) { "$($AppVersion)_Beta" } else { $AppVersion }
+$VersionJsonChannel = $ResolvedChannel.ToLowerInvariant()
 $ReleaseRoot = Join-Path $ProjectPath "shareable"
-$InstallerAssetName = "1SalemBOT_Setup_v$AppVersion.exe"
-$PortableAssetName = "1SalemBOT_Portable_v$AppVersion.zip"
+$InstallerAssetName = "1SalemBOT_Setup_v$AppVersionTag.exe"
+$PortableAssetName = "1SalemBOT_Portable_v$AppVersionTag.zip"
 $VersionJsonAssetName = "version.json"
 $InstallerPath = Join-Path $ReleaseRoot $InstallerAssetName
 $PortableZipPath = Join-Path $ReleaseRoot $PortableAssetName
@@ -39,8 +64,11 @@ foreach ($field in @("version", "installer_url", "portable_url", "release_notes"
         throw "version.json missing required field: $field"
     }
 }
-if ($versionJson.version -ne $AppVersion) {
-    throw "version.json version '$($versionJson.version)' does not match VERSION '$AppVersion'"
+if ($versionJson.version -ne $AppVersionLabel) {
+    throw "version.json version '$($versionJson.version)' does not match expected label '$AppVersionLabel'"
+}
+if ($versionJson.PSObject.Properties.Name.Contains("channel") -and $versionJson.channel -ne $VersionJsonChannel) {
+    throw "version.json channel '$($versionJson.channel)' does not match expected channel '$VersionJsonChannel'"
 }
 if ($versionJson.installer_url -ne "https://github.com/$Owner/$Repo/releases/latest/download/$InstallerAssetName") {
     throw "version.json installer_url is not the expected GitHub latest-download URL"
@@ -57,6 +85,10 @@ Write-Host "Local release artifact validation passed."
 if ($SkipRemote) {
     Write-Host "Remote GitHub release validation skipped."
     exit 0
+}
+
+if ($ResolvedChannel -ne "Stable") {
+    throw "Remote GitHub release validation is only allowed for Stable channel builds. Use -SkipRemote for Beta validation."
 }
 
 $headers = @{
@@ -87,8 +119,8 @@ foreach ($field in @("version", "installer_url", "portable_url", "release_notes"
         throw "Remote version.json missing required field: $field"
     }
 }
-if ($remoteVersionJson.version -ne $AppVersion) {
-    throw "Remote version.json version '$($remoteVersionJson.version)' does not match local VERSION '$AppVersion'"
+if ($remoteVersionJson.version -ne $AppVersionLabel) {
+    throw "Remote version.json version '$($remoteVersionJson.version)' does not match expected label '$AppVersionLabel'"
 }
 
 Write-Host "Remote GitHub latest release validation passed."

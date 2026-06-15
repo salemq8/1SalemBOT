@@ -1,6 +1,14 @@
+param(
+    [ValidateSet("Auto", "Beta", "Stable")]
+    [string]$Channel = "Auto"
+)
+
+$ErrorActionPreference = "Stop"
+
 $ProjectPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BuildScriptPath = Join-Path $ProjectPath "build_windows_app.ps1"
 $VersionFilePath = Join-Path $ProjectPath "VERSION"
+$VersionChannelFilePath = Join-Path $ProjectPath "VERSION_CHANNEL"
 if (-not (Test-Path $VersionFilePath)) {
     throw "VERSION file not found at $VersionFilePath"
 }
@@ -8,6 +16,31 @@ $AppVersion = (Get-Content -LiteralPath $VersionFilePath -Raw).Trim()
 if (-not $AppVersion) {
     throw "VERSION file is empty"
 }
+
+function Resolve-VersionChannel {
+    param([string]$RequestedChannel, [string]$ChannelFilePath)
+    $rawChannel = $RequestedChannel
+    if ($rawChannel -eq "Auto") {
+        if (Test-Path -LiteralPath $ChannelFilePath) {
+            $rawChannel = (Get-Content -LiteralPath $ChannelFilePath -Raw).Trim()
+        } else {
+            $rawChannel = "Stable"
+        }
+    }
+    switch -Regex ($rawChannel.ToLowerInvariant()) {
+        "^(beta|development|dev|local|testing)$" { return "Beta" }
+        "^(stable|release|public|production)$" { return "Stable" }
+        default { throw "Unsupported VERSION_CHANNEL value: $rawChannel" }
+    }
+}
+
+$ResolvedChannel = Resolve-VersionChannel -RequestedChannel $Channel -ChannelFilePath $VersionChannelFilePath
+$IsBeta = $ResolvedChannel -eq "Beta"
+$AppVersionLabel = if ($IsBeta) { "$AppVersion Beta" } else { $AppVersion }
+$AppVersionTag = if ($IsBeta) { "$($AppVersion)_Beta" } else { $AppVersion }
+$AppSourceVersionTag = if ($IsBeta) { "$AppVersion-Beta" } else { $AppVersion }
+$VersionJsonVersion = $AppVersionLabel
+$VersionJsonChannel = $ResolvedChannel.ToLowerInvariant()
 $VersionCore = ($AppVersion -split "[-+]")[0]
 $VersionParts = @($VersionCore -split "\." | ForEach-Object { [int]$_ })
 while ($VersionParts.Count -lt 4) {
@@ -15,19 +48,18 @@ while ($VersionParts.Count -lt 4) {
 }
 $AppVersionInfo = ($VersionParts[0..3] -join ".")
 $ReleaseRoot = Join-Path $ProjectPath "shareable"
-$PortableName = "1SalemBOT-Portable-v$AppVersion"
+$PortableName = if ($IsBeta) { "1SalemBOT-Portable-v$AppSourceVersionTag" } else { "1SalemBOT-Portable-v$AppVersionTag" }
 $PortablePath = Join-Path $ReleaseRoot $PortableName
-$PortableZipPath = Join-Path $ReleaseRoot "1SalemBOT_Portable_v$AppVersion.zip"
+$PortableZipPath = Join-Path $ReleaseRoot "1SalemBOT_Portable_v$AppVersionTag.zip"
 $VersionJsonPath = Join-Path $ReleaseRoot "version.json"
 $InstallerScriptPath = Join-Path $ProjectPath "installer.iss"
-$InstallerOutputPath = Join-Path $ReleaseRoot "1SalemBOT_Setup_v$AppVersion.exe"
+$InstallerOutputPath = Join-Path $ReleaseRoot "1SalemBOT_Setup_v$AppVersionTag.exe"
 $GitHubOwner = "salemq8"
 $GitHubRepo = "1SalemBOT"
 $GitHubLatestDownloadBase = "https://github.com/$GitHubOwner/$GitHubRepo/releases/latest/download"
-$InstallerAssetName = "1SalemBOT_Setup_v$AppVersion.exe"
-$PortableAssetName = "1SalemBOT_Portable_v$AppVersion.zip"
+$InstallerAssetName = "1SalemBOT_Setup_v$AppVersionTag.exe"
+$PortableAssetName = "1SalemBOT_Portable_v$AppVersionTag.zip"
 $BuiltAppPath = Join-Path $ProjectPath "dist\1SalemBOT"
-$VlcSourcePath = Join-Path ${env:ProgramFiles} "VideoLAN\VLC"
 $VlcTargetPath = Join-Path $PortablePath "vlc"
 $LauncherPath = Join-Path $PortablePath "Launch 1SalemBOT Portable.bat"
 $ReadmePath = Join-Path $PortablePath "README.txt"
@@ -54,7 +86,7 @@ if (Test-Path $ReleaseRoot) {
 }
 New-Item -ItemType Directory -Path $ReleaseRoot | Out-Null
 
-& powershell -ExecutionPolicy Bypass -File $BuildScriptPath
+& powershell -ExecutionPolicy Bypass -File $BuildScriptPath -Channel $ResolvedChannel
 if ($LASTEXITCODE -ne 0) {
     throw "Desktop build failed"
 }
@@ -65,25 +97,13 @@ if (-not (Test-Path $BuiltAppPath)) {
 
 Copy-Item -LiteralPath $BuiltAppPath -Destination $PortablePath -Recurse
 
-if (-not (Test-Path $VlcSourcePath)) {
-    throw "VLC runtime folder not found at $VlcSourcePath"
-}
-
-New-Item -ItemType Directory -Path $VlcTargetPath | Out-Null
-
-$vlcFolders = @("plugins", "locale", "lua", "hrtfs")
-foreach ($folderName in $vlcFolders) {
-    $sourceFolder = Join-Path $VlcSourcePath $folderName
-    if (Test-Path $sourceFolder) {
-        Copy-Item -LiteralPath $sourceFolder -Destination (Join-Path $VlcTargetPath $folderName) -Recurse
-    }
-}
-
-$vlcFiles = @("libvlc.dll", "libvlccore.dll", "vlc-cache-gen.exe")
-foreach ($fileName in $vlcFiles) {
-    $sourceFile = Join-Path $VlcSourcePath $fileName
-    if (Test-Path $sourceFile) {
-        Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $VlcTargetPath $fileName)
+foreach ($requiredVlcPath in @(
+    (Join-Path $VlcTargetPath "libvlc.dll"),
+    (Join-Path $VlcTargetPath "libvlccore.dll"),
+    (Join-Path $VlcTargetPath "plugins")
+)) {
+    if (-not (Test-Path -LiteralPath $requiredVlcPath)) {
+        throw "Bundled VLC runtime is missing from portable package: $requiredVlcPath"
     }
 }
 
@@ -96,7 +116,7 @@ start "" "%~dp01SalemBOT.exe"
 "@ | Set-Content -LiteralPath $LauncherPath -Encoding ASCII
 
 @"
-1SalemBOT Portable v$AppVersion
+1SalemBOT Portable v$AppVersionLabel
 ==================
 
 This portable build is ready to run on another Windows PC.
@@ -125,7 +145,7 @@ Notes:
 $unexpectedSensitiveFiles = Get-ChildItem -LiteralPath $PortablePath -Recurse -File |
     Where-Object {
         $_.FullName -notlike "*\user-data\*" -and
-        @("settings.json", "users.json", "dashboard_state.json", "music_command.json", "chat_log.txt", "twitch_bot_auth.json", "twitch_channel_auth.json") -contains $_.Name
+        @("settings.json", "users.json", "dashboard_state.json", "music_command.json", "chat_log.txt", "twitch_bot_auth.json", "twitch_channel_auth.json", "telemetry.json") -contains $_.Name
     }
 
 if ($unexpectedSensitiveFiles) {
@@ -142,23 +162,18 @@ if (Test-Path $InstallerOutputPath) {
     Remove-Item -LiteralPath $InstallerOutputPath -Force
 }
 
-$installerProcess = Start-Process -FilePath $InnoCompilerPath `
-    -ArgumentList @(
-        "/DMyAppVersion=$AppVersion",
-        "/DMyAppVersionInfo=$AppVersionInfo",
-        "/DMyAppSource=$PortablePath",
-        "/DMyInstallerOutput=$ReleaseRoot",
-        $InstallerScriptPath
-    ) `
-    -PassThru
-
-if (-not $installerProcess.WaitForExit(300000)) {
-    if (Test-Path $InstallerOutputPath) {
-        Stop-Process -Id $installerProcess.Id -Force -ErrorAction SilentlyContinue
-    } else {
-        Stop-Process -Id $installerProcess.Id -Force -ErrorAction SilentlyContinue
-        throw "Installer build timed out before producing the setup file"
-    }
+$innoArguments = @(
+    "/DMyAppVersion=$AppVersion",
+    "/DMyAppDisplayVersion=$AppVersionLabel",
+    "/DMyAppVersionTag=$AppVersionTag",
+    "/DMyAppVersionInfo=$AppVersionInfo",
+    "/DMyAppSource=$PortablePath",
+    "/DMyInstallerOutput=$ReleaseRoot",
+    $InstallerScriptPath
+)
+& $InnoCompilerPath @innoArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "Installer build failed with exit code $LASTEXITCODE"
 }
 
 if (-not (Test-Path $InstallerOutputPath)) {
@@ -187,15 +202,16 @@ if (Test-Path $changelogPath) {
     }
 }
 if (-not $releaseNotes) {
-    $releaseNotes = @("1SalemBOT v$AppVersion release.")
+    $releaseNotes = @("1SalemBOT v$AppVersionLabel release.")
 }
 
 $versionPayload = [ordered]@{
-    version = $AppVersion
+    version = $VersionJsonVersion
+    version_core = $AppVersion
     installer_url = "$GitHubLatestDownloadBase/$InstallerAssetName"
     portable_url = "$GitHubLatestDownloadBase/$PortableAssetName"
     release_notes = $releaseNotes
-    channel = "stable"
+    channel = $VersionJsonChannel
     installer = [ordered]@{
         name = $InstallerAssetName
         url = "$GitHubLatestDownloadBase/$InstallerAssetName"

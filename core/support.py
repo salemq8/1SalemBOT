@@ -9,12 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .app_paths import APP_STORAGE_DIR, CRASH_REPORT_STATE_FILE, LOGS_DIR
-from .version import APP_VERSION
+from .version import APP_VERSION_LABEL
 
 
 SUPPORT_EMAIL = "1Salembot.support@gmail.com"
-SUPPORT_SUBJECT = f"1SalemBOT Support Request v{APP_VERSION}"
-CRASH_SUBJECT = f"1SalemBOT Crash Report v{APP_VERSION}"
+SUPPORT_SUBJECT = f"1SalemBOT Support Request v{APP_VERSION_LABEL}"
+CRASH_SUBJECT = f"1SalemBOT Crash Report v{APP_VERSION_LABEL}"
 OUTLOOK_MAIL_ITEM = 0
 
 SECRET_PATTERNS = (
@@ -78,7 +78,7 @@ def redact_sensitive_text(value):
 def diagnostic_summary(extra=None):
     lines = [
         "1SalemBOT Diagnostic Summary",
-        f"App version: {APP_VERSION}",
+        f"App version: {APP_VERSION_LABEL}",
         f"Windows version: {platform.platform()}",
         f"Python runtime: {platform.python_version()}",
         f"Timestamp: {utc_timestamp()}",

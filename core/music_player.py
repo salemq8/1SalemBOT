@@ -49,6 +49,14 @@ VLC_PATH = resolve_vlc_path()
 
 if VLC_PATH.is_dir():
     os.environ["PATH"] = str(VLC_PATH) + os.pathsep + os.environ.get("PATH", "")
+    plugin_env_path = VLC_PATH / "plugins"
+    if plugin_env_path.is_dir():
+        os.environ["VLC_PLUGIN_PATH"] = str(plugin_env_path)
+    if os.name == "nt":
+        try:
+            os.add_dll_directory(str(VLC_PATH))
+        except Exception:
+            pass
 
 
 @dataclass

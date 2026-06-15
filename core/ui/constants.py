@@ -1,9 +1,9 @@
 from core.app_paths import APP_NAME
-from core.version import APP_VERSION
+from core.version import APP_VERSION, APP_VERSION_LABEL
 
 
 APP_ID = "1SalemBOT.DesktopApp"
-APP_DISPLAY_NAME = f"{APP_NAME} v{APP_VERSION}"
+APP_DISPLAY_NAME = f"{APP_NAME} v{APP_VERSION_LABEL}"
 DEFAULT_WINDOW_SIZE = (1500, 950)
 THUMBNAIL_PLACEHOLDER = "Thumbnail will appear here"
 NO_TRACK_TEXT = "No track loaded"

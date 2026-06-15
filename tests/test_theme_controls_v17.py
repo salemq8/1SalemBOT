@@ -173,6 +173,7 @@ class ThemeControlsStyleTest(unittest.TestCase):
         patches = (
             ("ensure_alerts_listener", lambda self, force=False: None),
             ("schedule_startup_auto_restart", lambda self: None),
+            ("start_telemetry_sync", lambda self: None),
             ("request_auth_health_check", lambda self, force=False: None),
             ("check_for_updates", lambda self, auto=False: None),
         )

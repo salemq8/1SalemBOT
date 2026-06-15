@@ -109,6 +109,7 @@ from core.support import (
     pending_crash_report,
     support_mailto_url,
 )
+from core.telemetry import sync_installation_async
 
 from .chat_renderer import ChatRenderer
 from .constants import (
@@ -119,6 +120,7 @@ from .constants import (
     MUSIC_INPUT_PLACEHOLDER,
     NAVIGATION_ITEMS,
 )
+from core.version import APP_VERSION_CHANNEL_NAME, APP_VERSION_LABEL
 from .localization import (
     ARABIC_FONT_FAMILY,
     ARABIC_FONT_FAMILIES,
@@ -250,6 +252,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.pending_update_release = None
         self.pending_update_asset = None
         self.installing_update = False
+        self.telemetry_thread = None
         self._localized_bindings = []
         self._localized_binding_keys = set()
         self._language_applying = False
@@ -345,6 +348,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
 
         self.build_ui()
         self.load_initial_values()
+        self.start_telemetry_sync()
         self.start_timers()
 
     # =========================
@@ -371,6 +375,20 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 self.music_player.set_muted(self.audio_muted)
                 self.apply_audio_state_from_player(self.music_player.get_audio_state(), persist=False)
         return self.music_player
+
+    def start_telemetry_sync(self):
+        settings_snapshot = {
+            "channel_login": self.settings.get("channel_login", ""),
+            "bot_login": self.settings.get("bot_login", ""),
+        }
+
+        def on_result(result):
+            if getattr(result, "ok", False):
+                self.bridge.log_signal.emit(f"[Telemetry] Usage tracking {result.action}.")
+            else:
+                self.bridge.log_signal.emit("[Telemetry] Usage tracking skipped.")
+
+        self.telemetry_thread = sync_installation_async(settings_snapshot, on_result=on_result)
 
     def get_app_icon(self):
         for path in [WINDOW_ICON_ICO, WINDOW_ICON_PNG, WINDOW_ICON_JPG, WINDOW_ICON_JPEG]:
@@ -2037,14 +2055,14 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         version_col.addWidget(self.make_small_title("Current Version"))
         self.update_current_version_value = QLabel()
         self.set_label_role(self.update_current_version_value, "valueLarge")
-        self.set_localized_text(self.update_current_version_value, "updates.current_version_value", version=APP_VERSION)
+        self.set_localized_text(self.update_current_version_value, "updates.current_version_value", version=APP_VERSION_LABEL)
         version_col.addWidget(self.update_current_version_value)
         status_row.addLayout(version_col, 1)
 
         provider_col = QVBoxLayout()
         provider_col.setSpacing(4)
         provider_col.addWidget(self.make_small_title("Release Channel"))
-        self.update_channel_value = QLabel(self.update_config.release_channel.title())
+        self.update_channel_value = QLabel(APP_VERSION_CHANNEL_NAME)
         self.set_label_role(self.update_channel_value, "mutedBody")
         provider_col.addWidget(self.update_channel_value)
         status_row.addLayout(provider_col, 1)
@@ -2314,8 +2332,8 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             return
         if not payload.get("is_newer"):
             version = getattr(release, "version", APP_VERSION)
-            self.set_update_status(f"Already up to date. Current version: {APP_VERSION}. Latest version: {version}.")
-            self.append_log(f"[Updates] Already up to date ({APP_VERSION})")
+            self.set_update_status(f"Already up to date. Current version: {APP_VERSION_LABEL}. Latest version: {version}.")
+            self.append_log(f"[Updates] Already up to date ({APP_VERSION_LABEL})")
             return
         if installer_asset is None:
             self.set_update_status("Update available, but no Windows installer asset was provided.")
@@ -2332,7 +2350,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
     def show_update_available_dialog(self, release, installer_asset, auto=False):
         version = getattr(release, "version", "")
         notes = "\n".join(getattr(release, "notes_lines", [])[:8])
-        message = f"Version {version} is available.\n\nCurrent version: {APP_VERSION}"
+        message = f"Version {version} is available.\n\nCurrent version: {APP_VERSION_LABEL}"
         if notes:
             message += f"\n\nRelease notes:\n{notes}"
         message += "\n\nDownload and run the installer now?"

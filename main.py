@@ -57,6 +57,35 @@ def launch_desktop_app():
     log_console("[APP] App started")
     log_console(f"[QT] Plugin path: {qt_plugin_path or 'not found'}")
     try:
+        from core.app_paths import (
+            ALERTS_FILE,
+            CHAT_LOG_FILE,
+            DASHBOARD_STATE_FILE,
+            MUSIC_COMMAND_FILE,
+            SETTINGS_FILE,
+            USERS_FILE,
+            VIEWER_RELATIONSHIPS_FILE,
+        )
+        from core.app_state import ensure_app_files, load_json
+        from core.legal import legal_acceptance_current
+
+        ensure_app_files(
+            SETTINGS_FILE,
+            USERS_FILE,
+            DASHBOARD_STATE_FILE,
+            MUSIC_COMMAND_FILE,
+            CHAT_LOG_FILE,
+            VIEWER_RELATIONSHIPS_FILE,
+            ALERTS_FILE,
+        )
+        settings = load_json(SETTINGS_FILE, {})
+        if not legal_acceptance_current(settings):
+            from core.ui.legal_dialog import request_legal_acceptance
+
+            if not request_legal_acceptance(SETTINGS_FILE):
+                log_console("[APP] Terms and privacy acceptance declined")
+                return 0
+
         from core.ui.window import DashboardApp
 
         window = DashboardApp()

@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.8 - Usage Tracking
+
+### Added
+
+- Supabase installation telemetry that creates one persistent local install id and syncs app startup usage to the `installations` table.
+- Startup telemetry uses an insert-or-ignore plus update flow keyed by install id, storing only install id, channel name, bot name, app version, OS version, first seen, and last seen.
+- Telemetry runs in the background and does not send Twitch tokens, OpenAI API keys, passwords, chat logs, or other private runtime data.
+- Telemetry diagnostics are written to `%APPDATA%\1SalemBOT\logs\telemetry.log` with startup steps, payloads, HTTP status codes, response bodies, and exception stack traces.
+- VLC runtime is bundled inside the local app folder, setup installer, and portable ZIP so users do not need system VLC installed for music playback.
+- Build validation now checks that bundled VLC includes `libvlc.dll`, `libvlccore.dll`, and the VLC plugins folder.
+- Mandatory bilingual Terms of Use and Privacy Policy acceptance is shown before first app access and whenever document versions change.
+- Legal acceptance is stored in settings with terms/privacy versions, acceptance flags, and timestamp.
+
 ## v1.7 - Support, Updates, and Queue Controls
 
 ### Added
@@ -93,5 +106,5 @@
 ### Release Outputs
 
 - `1SalemBOT.exe`
-- `1SalemBOT_Setup_v1.7.exe`
-- `1SalemBOT_Portable_v1.7.zip`
+- `1SalemBOT_Setup_v1.8.exe`
+- `1SalemBOT_Portable_v1.8.zip`

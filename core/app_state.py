@@ -104,6 +104,11 @@ def default_settings():
         "audio_muted": False,
         "openai_api_key": "",
         "system_prompt": DEFAULT_PROMPT,
+        "terms_version": "",
+        "privacy_version": "",
+        "accepted_terms": False,
+        "accepted_privacy": False,
+        "accepted_at": "",
     }
 
 
@@ -230,7 +235,7 @@ def load_json(path: Path, default):
     try:
         if not path.exists():
             return default
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return default
 

@@ -7,6 +7,12 @@
 #ifndef MyAppVersionInfo
   #error MyAppVersionInfo must be passed by build_shareable_release.ps1 from VERSION.
 #endif
+#ifndef MyAppDisplayVersion
+  #define MyAppDisplayVersion MyAppVersion
+#endif
+#ifndef MyAppVersionTag
+  #define MyAppVersionTag MyAppVersion
+#endif
 #ifndef MyAppSource
   #error MyAppSource must be passed by build_shareable_release.ps1.
 #endif
@@ -18,7 +24,7 @@
 AppId={{D1E62D79-7D6A-4D82-BD64-1A6F8E2C4C55}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppVerName={#MyAppName} Setup v{#MyAppVersion}
+AppVerName={#MyAppName} Setup v{#MyAppDisplayVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={code:GetInstallDir}
 DefaultGroupName={#MyAppName}
@@ -26,7 +32,7 @@ DisableProgramGroupPage=no
 PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir={#MyInstallerOutput}
-OutputBaseFilename=1SalemBOT_Setup_v{#MyAppVersion}
+OutputBaseFilename=1SalemBOT_Setup_v{#MyAppVersionTag}
 SetupIconFile={#MyAppSource}\_internal\assets\bot_icon.ico
 Compression=lzma
 SolidCompression=yes
@@ -36,8 +42,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesInstallIn64BitMode=x64compatible
 VersionInfoVersion={#MyAppVersionInfo}
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription={#MyAppName}
-VersionInfoProductName={#MyAppName}
+VersionInfoDescription={#MyAppName} v{#MyAppDisplayVersion}
+VersionInfoProductName={#MyAppName} v{#MyAppDisplayVersion}
 VersionInfoProductVersion={#MyAppVersionInfo}
 VersionInfoCopyright={#MyAppPublisher}
 
