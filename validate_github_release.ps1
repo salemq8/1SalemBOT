@@ -40,18 +40,21 @@ function Resolve-VersionChannel {
 $ResolvedChannel = Resolve-VersionChannel -RequestedChannel $Channel -ChannelFilePath $VersionChannelFilePath
 $IsBeta = $ResolvedChannel -eq "Beta"
 $AppVersionLabel = if ($IsBeta) { "$AppVersion Beta" } else { $AppVersion }
-$AppVersionTag = if ($IsBeta) { "$($AppVersion)_Beta" } else { $AppVersion }
+$AppVersionTag = if ($IsBeta) { "$AppVersion-Beta" } else { $AppVersion }
 $VersionJsonChannel = $ResolvedChannel.ToLowerInvariant()
 $ReleaseRoot = Join-Path $ProjectPath "shareable"
 $InstallerAssetName = "1SalemBOT_Setup_v$AppVersionTag.exe"
 $PortableAssetName = "1SalemBOT_Portable_v$AppVersionTag.zip"
 $VersionJsonAssetName = "version.json"
+$Sha256SumsAssetName = "SHA256SUMS.txt"
 $InstallerPath = Join-Path $ReleaseRoot $InstallerAssetName
 $PortableZipPath = Join-Path $ReleaseRoot $PortableAssetName
 $VersionJsonPath = Join-Path $ReleaseRoot $VersionJsonAssetName
+$Sha256SumsPath = Join-Path $ReleaseRoot $Sha256SumsAssetName
 $UpdateUrl = "https://github.com/$Owner/$Repo/releases/latest/download/version.json"
+$DownloadBase = if ($IsBeta) { "https://github.com/$Owner/$Repo/releases/latest/download" } else { "https://github.com/$Owner/$Repo/releases/download/v$AppVersion" }
 
-$localRequiredFiles = @($InstallerPath, $PortableZipPath, $VersionJsonPath)
+$localRequiredFiles = @($InstallerPath, $PortableZipPath, $VersionJsonPath, $Sha256SumsPath)
 foreach ($path in $localRequiredFiles) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Local release artifact missing: $path"
@@ -70,14 +73,21 @@ if ($versionJson.version -ne $AppVersionLabel) {
 if ($versionJson.PSObject.Properties.Name.Contains("channel") -and $versionJson.channel -ne $VersionJsonChannel) {
     throw "version.json channel '$($versionJson.channel)' does not match expected channel '$VersionJsonChannel'"
 }
-if ($versionJson.installer_url -ne "https://github.com/$Owner/$Repo/releases/latest/download/$InstallerAssetName") {
-    throw "version.json installer_url is not the expected GitHub latest-download URL"
+if ($versionJson.installer_url -ne "$DownloadBase/$InstallerAssetName") {
+    throw "version.json installer_url is not the expected GitHub release URL"
 }
-if ($versionJson.portable_url -ne "https://github.com/$Owner/$Repo/releases/latest/download/$PortableAssetName") {
-    throw "version.json portable_url is not the expected GitHub latest-download URL"
+if ($versionJson.portable_url -ne "$DownloadBase/$PortableAssetName") {
+    throw "version.json portable_url is not the expected GitHub release URL"
 }
 if (-not $versionJson.release_notes -or $versionJson.release_notes.Count -lt 1) {
     throw "version.json release_notes is empty"
+}
+
+$shaContent = Get-Content -LiteralPath $Sha256SumsPath -Raw -Encoding UTF8
+foreach ($assetName in @($InstallerAssetName, $PortableAssetName, $VersionJsonAssetName)) {
+    if ($shaContent -notmatch [regex]::Escape($assetName)) {
+        throw "SHA256SUMS.txt missing asset: $assetName"
+    }
 }
 
 Write-Host "Local release artifact validation passed."
@@ -103,7 +113,7 @@ try {
 }
 
 $assetNames = @($latestRelease.assets | ForEach-Object { $_.name })
-foreach ($assetName in @($VersionJsonAssetName, $InstallerAssetName, $PortableAssetName)) {
+foreach ($assetName in @($VersionJsonAssetName, $InstallerAssetName, $PortableAssetName, $Sha256SumsAssetName)) {
     if ($assetNames -notcontains $assetName) {
         throw "Latest GitHub release is missing required asset: $assetName"
     }

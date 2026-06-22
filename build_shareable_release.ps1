@@ -37,7 +37,7 @@ function Resolve-VersionChannel {
 $ResolvedChannel = Resolve-VersionChannel -RequestedChannel $Channel -ChannelFilePath $VersionChannelFilePath
 $IsBeta = $ResolvedChannel -eq "Beta"
 $AppVersionLabel = if ($IsBeta) { "$AppVersion Beta" } else { $AppVersion }
-$AppVersionTag = if ($IsBeta) { "$($AppVersion)_Beta" } else { $AppVersion }
+$AppVersionTag = if ($IsBeta) { "$AppVersion-Beta" } else { $AppVersion }
 $AppSourceVersionTag = if ($IsBeta) { "$AppVersion-Beta" } else { $AppVersion }
 $VersionJsonVersion = $AppVersionLabel
 $VersionJsonChannel = $ResolvedChannel.ToLowerInvariant()
@@ -57,8 +57,11 @@ $InstallerOutputPath = Join-Path $ReleaseRoot "1SalemBOT_Setup_v$AppVersionTag.e
 $GitHubOwner = "salemq8"
 $GitHubRepo = "1SalemBOT"
 $GitHubLatestDownloadBase = "https://github.com/$GitHubOwner/$GitHubRepo/releases/latest/download"
+$GitHubReleaseTag = "v$AppVersion"
+$GitHubReleaseDownloadBase = if ($IsBeta) { $GitHubLatestDownloadBase } else { "https://github.com/$GitHubOwner/$GitHubRepo/releases/download/$GitHubReleaseTag" }
 $InstallerAssetName = "1SalemBOT_Setup_v$AppVersionTag.exe"
 $PortableAssetName = "1SalemBOT_Portable_v$AppVersionTag.zip"
+$Sha256SumsPath = Join-Path $ReleaseRoot "SHA256SUMS.txt"
 $BuiltAppPath = Join-Path $ProjectPath "dist\1SalemBOT"
 $VlcTargetPath = Join-Path $PortablePath "vlc"
 $LauncherPath = Join-Path $PortablePath "Launch 1SalemBOT Portable.bat"
@@ -208,20 +211,20 @@ if (-not $releaseNotes) {
 $versionPayload = [ordered]@{
     version = $VersionJsonVersion
     version_core = $AppVersion
-    installer_url = "$GitHubLatestDownloadBase/$InstallerAssetName"
-    portable_url = "$GitHubLatestDownloadBase/$PortableAssetName"
+    installer_url = "$GitHubReleaseDownloadBase/$InstallerAssetName"
+    portable_url = "$GitHubReleaseDownloadBase/$PortableAssetName"
     release_notes = $releaseNotes
     channel = $VersionJsonChannel
     installer = [ordered]@{
         name = $InstallerAssetName
-        url = "$GitHubLatestDownloadBase/$InstallerAssetName"
+        url = "$GitHubReleaseDownloadBase/$InstallerAssetName"
         sha256 = (Get-FileHash -LiteralPath $InstallerOutputPath -Algorithm SHA256).Hash.ToLowerInvariant()
         silent_args = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
         supports_silent = $true
     }
     portable = [ordered]@{
         name = $PortableAssetName
-        url = "$GitHubLatestDownloadBase/$PortableAssetName"
+        url = "$GitHubReleaseDownloadBase/$PortableAssetName"
         sha256 = (Get-FileHash -LiteralPath $PortableZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
         supports_silent = $false
     }
@@ -232,7 +235,18 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($VersionJsonPath, $versionJson, $utf8NoBom)
 Copy-Item -LiteralPath $VersionJsonPath -Destination (Join-Path $PortablePath "version.json") -Force
 
-$requiredReleaseFiles = @($InstallerOutputPath, $PortableZipPath, $VersionJsonPath)
+$hashRows = @(
+    [ordered]@{ Path = $InstallerOutputPath; Name = $InstallerAssetName },
+    [ordered]@{ Path = $PortableZipPath; Name = $PortableAssetName },
+    [ordered]@{ Path = $VersionJsonPath; Name = "version.json" }
+)
+$shaLines = foreach ($row in $hashRows) {
+    $hash = (Get-FileHash -LiteralPath $row.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$hash  $($row.Name)"
+}
+[System.IO.File]::WriteAllText($Sha256SumsPath, (($shaLines -join "`n") + "`n"), $utf8NoBom)
+
+$requiredReleaseFiles = @($InstallerOutputPath, $PortableZipPath, $VersionJsonPath, $Sha256SumsPath)
 foreach ($requiredReleaseFile in $requiredReleaseFiles) {
     if (-not (Test-Path -LiteralPath $requiredReleaseFile)) {
         throw "Release artifact missing: $requiredReleaseFile"
@@ -243,3 +257,4 @@ Write-Host "Portable build created at $PortablePath"
 Write-Host "Portable zip created at $PortableZipPath"
 Write-Host "Installer created at $InstallerOutputPath"
 Write-Host "Update metadata created at $VersionJsonPath"
+Write-Host "SHA-256 sums created at $Sha256SumsPath"

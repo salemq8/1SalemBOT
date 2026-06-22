@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.9 - The Smoothness Update
+
+### Fixed
+
+- Replaced the normal Twitch redirect-copy login workflow with Twitch Device Code authorization for Bot Account and Channel Account.
+- Added encrypted Windows DPAPI token storage for newly saved Twitch access and refresh tokens, with safe legacy plaintext migration.
+- Added single-flight refresh-token rotation handling per Twitch role so Bot and Channel sessions cannot race or mix.
+- Fixed a Twitch auth freeze where failed Channel/Bot plaintext token migration could retry repeatedly after disconnect; disconnected roles now skip migration/validation/profile work until reconnect.
+- Fixed packaged Bot Account and Channel Account sidebar profile lookup by making the canonical Twitch user lookup available in the background worker runtime path.
+- Added profile lookup duplicate-task protection, stale-result guards, failure cooldown, and one-time recovery/failure logging per role.
+- Fixed Viewer Relationships pagination crash caused by inconsistent singular/plural table model references.
+- Hardened Viewer Relationships pagination so empty, loading, collapsed, filtered, and rapidly clicked pages clamp safely.
+
+### Changed
+
+- Twitch setup cards now show `Connect with Twitch` and hide the legacy redirect paste workflow behind a Developer Diagnostics fallback.
+- Twitch account cards no longer show token masks or full scope lists in the normal UI.
+- Cached Alerts rendering now logs one bulk summary instead of one line per rendered row, while still deduplicating by stable event identity.
+- Disabled update checks now show an informational disabled state without starting a GitHub/network task.
+- Telemetry normal logging is concise, with detailed redacted request diagnostics available only when developer diagnostics are enabled.
+- Verbose runtime details such as local paths, token metadata, request details, and transport diagnostics now route to a rotated diagnostics log instead of the normal Live Log.
+- Stable release identity now uses `1SalemBOT v1.9` consistently across app display, generated metadata, source package, installer, portable package, and update metadata.
+- Stable artifact names now use the public release format `1SalemBOT_Setup_v1.9.exe`, `1SalemBOT_Portable_v1.9.zip`, and `1SalemBOT-v1.9-source.zip`.
+- JSON state saving now uses safer atomic writes with malformed-file backup recovery.
+- Update checks now respect release channels and require SHA-256 verification before installing downloaded updates.
+
+### Added
+
+- Device Code authorization dialog with user code display, browser reopen, copy code, countdown, cancel, status updates, English/Arabic strings, and RTL-safe LTR code rendering.
+- Central Qt-compatible named background task manager for duplicate-task prevention and safer completion/error callbacks.
+- Regression coverage for Viewer Relationships pagination, Product Tester role priority, atomic JSON recovery, profile lookup runtime imports, alert render summaries, update disabled behavior, task duplicate prevention, telemetry log privacy/rotation, and update channel/hash behavior.
+
 ## v1.8 - Usage Tracking
 
 ### Added

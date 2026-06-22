@@ -37,7 +37,7 @@ function Resolve-VersionChannel {
 $ResolvedChannel = Resolve-VersionChannel -RequestedChannel $Channel -ChannelFilePath $VersionChannelFilePath
 $IsBeta = $ResolvedChannel -eq "Beta"
 $AppVersionLabel = if ($IsBeta) { "$AppVersion Beta" } else { $AppVersion }
-$AppVersionTag = if ($IsBeta) { "$($AppVersion)_Beta" } else { $AppVersion }
+$AppVersionTag = if ($IsBeta) { "$AppVersion-Beta" } else { $AppVersion }
 $SourceVersionTag = if ($IsBeta) { "$AppVersion-Beta" } else { $AppVersion }
 $SourceFolderName = "1SalemBOT-v$SourceVersionTag-source"
 $SourceZipName = "$SourceFolderName.zip"
@@ -51,8 +51,9 @@ $ShareableRoot = Join-Path $ProjectPath "shareable"
 $InstallerPath = Join-Path $ShareableRoot "1SalemBOT_Setup_v$AppVersionTag.exe"
 $PortableZipPath = Join-Path $ShareableRoot "1SalemBOT_Portable_v$AppVersionTag.zip"
 $VersionJsonPath = Join-Path $ShareableRoot "version.json"
+$Sha256SumsPath = Join-Path $ShareableRoot "SHA256SUMS.txt"
 
-foreach ($requiredArtifact in @($InstallerPath, $PortableZipPath, $VersionJsonPath)) {
+foreach ($requiredArtifact in @($InstallerPath, $PortableZipPath, $VersionJsonPath, $Sha256SumsPath)) {
     if (-not (Test-Path -LiteralPath $requiredArtifact)) {
         throw "Required artifact missing. Build channel $ResolvedChannel first: $requiredArtifact"
     }
@@ -144,11 +145,18 @@ Get-ChildItem -LiteralPath $SourceRoot -Recurse -Force -File |
 Copy-Item -LiteralPath $InstallerPath -Destination $ArtifactsRoot -Force
 Copy-Item -LiteralPath $PortableZipPath -Destination $ArtifactsRoot -Force
 Copy-Item -LiteralPath $VersionJsonPath -Destination $ArtifactsRoot -Force
+Copy-Item -LiteralPath $Sha256SumsPath -Destination $ArtifactsRoot -Force
 
 if (Test-Path -LiteralPath $SourceZip) {
     Remove-Item -LiteralPath $SourceZip -Force
 }
 Compress-Archive -Path (Join-Path $SourceRoot "*") -DestinationPath $SourceZip -Force
+
+$artifactSha256SumsPath = Join-Path $ArtifactsRoot "SHA256SUMS.txt"
+if (Test-Path -LiteralPath $artifactSha256SumsPath) {
+    $sourceZipHash = (Get-FileHash -LiteralPath $SourceZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    Add-Content -LiteralPath $artifactSha256SumsPath -Value "$sourceZipHash  $SourceZipName" -Encoding UTF8
+}
 
 $checklistPath = Join-Path $ReleaseRoot "RELEASE_CHECKLIST.md"
 $generated = Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"
@@ -168,6 +176,7 @@ Generated: $generated
 - Windows setup installer.
 - Windows portable zip.
 - GitHub update metadata version.json.
+- SHA256SUMS.txt for release artifact verification.
 - Bundled VLC runtime inside the app package artifacts.
 
 ## Excluded
@@ -190,6 +199,7 @@ Generated: $generated
 - artifacts/1SalemBOT_Setup_v$AppVersionTag.exe
 - artifacts/1SalemBOT_Portable_v$AppVersionTag.zip
 - artifacts/version.json
+- artifacts/SHA256SUMS.txt
 - $SourceZipName
 "@ | Set-Content -LiteralPath $checklistPath -Encoding UTF8
 

@@ -1,11 +1,11 @@
-# 1SalemBOT v1.8
+# 1SalemBOT v1.9
 
 1SalemBOT is a Windows desktop Twitch management app for running a channel bot, live alerts, AI chat replies, music requests, viewer tools, dashboard analytics, and bilingual English/Arabic UI.
 
 ## Features
 
-- Twitch Bot Account login for chat replies, commands, and moderation-related actions.
-- Twitch Channel Account login for broadcaster-level dashboard features and live alerts.
+- Twitch Device Code login for separate Bot Account and Channel Account sessions, with no redirect URL copy/paste.
+- Windows DPAPI-protected Twitch token storage with separate encrypted credentials for each role.
 - EventSub-powered Alerts listener that starts automatically when the Channel Account is connected.
 - Optional one-shot startup bot restart with overlap protection, while keeping the manual Restart Bot button available.
 - Real alert feed for follows, subs, gifted subs, raids, bits, rewards, polls, predictions, hype train, shoutouts, and supported channel events.
@@ -27,7 +27,7 @@
 
 - Windows 10/11.
 - Python 3.11 or newer for source runs/builds.
-- Twitch developer application with the configured redirect URI used by the app.
+- Twitch developer application/client ID that supports Device Code authorization. No client secret is stored in the desktop app.
 - OpenAI API key for AI chat replies.
 - VLC installed in `C:\Program Files\VideoLAN\VLC` only on the build machine, so the release can bundle the runtime.
 - Inno Setup 6 when building the installer.
@@ -44,31 +44,33 @@ For duplicate-safe startup tracking, `install_id` must be a primary key or uniqu
 
 The numeric version is stored in the root `VERSION` file. The build channel is stored in `VERSION_CHANNEL`.
 
-This official release uses:
+This stable public release uses:
 
 ```text
-VERSION=1.8
+VERSION=1.9
 VERSION_CHANNEL=stable
 ```
 
-Public GitHub releases must be built with the Stable channel:
+Stable artifacts are labeled like `1SalemBOT v1.9`.
+
+Build the stable package with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_shareable_release.ps1 -Channel Stable
 powershell -ExecutionPolicy Bypass -File .\build_github_package.ps1 -Channel Stable
 ```
 
-Stable artifacts are labeled like `1SalemBOT v1.8`.
+The GitHub release tag and title for this release are `v1.9` and `1SalemBOT v1.9`.
 
 ## Install From Release
 
 Use one of the release artifacts:
 
-- `1SalemBOT_Setup_v1.8.exe` for normal Windows installation.
-- `1SalemBOT_Portable_v1.8.zip` for portable use.
+- `1SalemBOT_Setup_v1.9.exe` for normal Windows installation.
+- `1SalemBOT_Portable_v1.9.zip` for portable use.
 - `dist/1SalemBOT/1SalemBOT.exe` for the local one-folder desktop build.
 
-The app stores runtime settings, Twitch tokens, logs, and user data in the Windows app data folder by default. Portable mode stores runtime data in `user-data` beside the launcher.
+The app stores runtime settings, encrypted Twitch token files, logs, and user data in the Windows app data folder by default. Portable mode stores runtime data in `user-data` beside the launcher, while Twitch token secrets remain protected by the current Windows user through DPAPI.
 
 ## Run From Source
 
@@ -96,10 +98,11 @@ powershell -ExecutionPolicy Bypass -File .\build_shareable_release.ps1
 Outputs:
 
 - `dist/1SalemBOT/`
-- `shareable/1SalemBOT-Portable-v1.8/`
-- `shareable/1SalemBOT_Portable_v1.8.zip`
-- `shareable/1SalemBOT_Setup_v1.8.exe`
+- `shareable/1SalemBOT-Portable-v1.9/`
+- `shareable/1SalemBOT_Portable_v1.9.zip`
+- `shareable/1SalemBOT_Setup_v1.9.exe`
 - `shareable/version.json`
+- `shareable/SHA256SUMS.txt`
 
 ## Updates
 
@@ -118,14 +121,14 @@ Generated `version.json` shape:
 
 ```json
 {
-  "version": "1.8",
-  "installer_url": "https://github.com/salemq8/1SalemBOT/releases/latest/download/1SalemBOT_Setup_v1.8.exe",
-  "portable_url": "https://github.com/salemq8/1SalemBOT/releases/latest/download/1SalemBOT_Portable_v1.8.zip",
+  "version": "1.9",
+  "installer_url": "https://github.com/salemq8/1SalemBOT/releases/download/v1.9/1SalemBOT_Setup_v1.9.exe",
+  "portable_url": "https://github.com/salemq8/1SalemBOT/releases/download/v1.9/1SalemBOT_Portable_v1.9.zip",
   "release_notes": ["Change one", "Change two"],
   "channel": "stable",
   "installer": {
-    "name": "1SalemBOT_Setup_v1.8.exe",
-    "url": "https://github.com/salemq8/1SalemBOT/releases/latest/download/1SalemBOT_Setup_v1.8.exe",
+    "name": "1SalemBOT_Setup_v1.9.exe",
+    "url": "https://github.com/salemq8/1SalemBOT/releases/download/v1.9/1SalemBOT_Setup_v1.9.exe",
     "sha256": "optional-sha256",
     "silent_args": ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
   }
@@ -136,17 +139,18 @@ Generated `version.json` shape:
 
 1. Update `VERSION`.
 2. Update `CHANGELOG.md`.
-3. Build the release:
+3. Build the stable release:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_shareable_release.ps1 -Channel Stable
 powershell -ExecutionPolicy Bypass -File .\build_github_package.ps1 -Channel Stable
 ```
 
-4. Upload these files to the GitHub Release for `salemq8/1SalemBOT`:
+4. Create a normal GitHub Release for `salemq8/1SalemBOT` with tag `v1.9` and title `1SalemBOT v1.9`, then upload:
    - `shareable/1SalemBOT_Setup_v<VERSION>.exe`
    - `shareable/1SalemBOT_Portable_v<VERSION>.zip`
    - `shareable/version.json`
+   - `shareable/SHA256SUMS.txt`
 5. Validate local assets before upload:
 
 ```powershell

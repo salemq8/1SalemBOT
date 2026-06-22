@@ -4,21 +4,21 @@ This project publishes Windows updates through GitHub Releases for `salemq8/1Sal
 
 ## 1. Set VERSION And Channel
 
-For the official v1.8 GitHub release:
+For the v1.9 stable release:
 
 ```text
-VERSION: 1.8
+VERSION: 1.9
 VERSION_CHANNEL: stable
 ```
 
-Public GitHub releases are built with the Stable channel and are labeled `1SalemBOT v<VERSION>`.
+Stable releases are built with the Stable channel and are labeled `1SalemBOT v<VERSION>`.
 
 ## 2. Update Changelog
 
 Add a new top entry in `CHANGELOG.md`:
 
 ```markdown
-## v1.8 - Release Name
+## v1.9 - The Smoothness Update
 
 ### Added
 
@@ -41,6 +41,7 @@ Generated files:
 - `shareable/1SalemBOT_Setup_v<VERSION>.exe`
 - `shareable/1SalemBOT_Portable_v<VERSION>.zip`
 - `shareable/version.json`
+- `shareable/SHA256SUMS.txt`
 - `release_github/1SalemBOT-v<VERSION>-source.zip`
 
 ## 4. Validate Local Release Assets
@@ -72,11 +73,14 @@ Recommended tag:
 v<VERSION>
 ```
 
+For v1.9, use tag `v1.9`, release title `1SalemBOT v1.9`, and create it as a normal public release.
+
 Upload all required assets:
 
 - `1SalemBOT_Setup_v<VERSION>.exe`
 - `1SalemBOT_Portable_v<VERSION>.zip`
 - `version.json`
+- `SHA256SUMS.txt`
 
 ## 6. Verify Update Endpoint
 
