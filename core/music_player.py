@@ -12,6 +12,7 @@ from PIL import Image
 
 from .app_paths import APP_NAME, PROJECT_ROOT, WINDOW_ICON_ICO
 from .music_metadata import clean_youtube_watch_url, metadata_channel
+from .runtime_logging import write_diagnostics_line
 from .ui.constants import APP_VERSION
 
 try:
@@ -79,6 +80,12 @@ class MusicPlayer:
         if not plugin_path.is_dir():
             raise FileNotFoundError(f"VLC plugins folder not found: {plugin_path}")
 
+        self.target_volume = max(0, min(100, int(initial_volume)))
+        self.target_muted = bool(initial_muted)
+        self.audio_session = None
+        self.audio_session_identity_applied = False
+        self.audio_session_name = APP_NAME
+        self.last_audio_diagnostic_signature = ""
         try:
             self.instance = vlc.Instance(
                 "--no-video",
@@ -93,8 +100,8 @@ class MusicPlayer:
             except Exception:
                 pass
             self.player = self.instance.media_player_new()
-            self.player.audio_set_volume(100)
-            self.player.audio_set_mute(False)
+            self.player.audio_set_volume(self.target_volume)
+            self.player.audio_set_mute(self.target_muted)
         except Exception as exc:
             raise RuntimeError(
                 "Failed to initialize VLC from Python. Make sure VLC matches your Python architecture."
@@ -102,18 +109,12 @@ class MusicPlayer:
 
         self.current_track: Optional[TrackInfo] = None
         self.current_media = None
-        self.target_volume = max(0, min(100, int(initial_volume)))
-        self.target_muted = bool(initial_muted)
-        self.audio_session = None
-        self.audio_session_identity_applied = False
-        self.audio_session_name = APP_NAME
         self.audio_session_icon = icon_path
         self._apply_player_fallback_audio_state()
 
     def _apply_player_fallback_audio_state(self):
         try:
-            volume = 100 if self.audio_session is not None else self.target_volume
-            self.player.audio_set_volume(volume)
+            self.player.audio_set_volume(self.target_volume)
             self.player.audio_set_mute(self.target_muted)
         except Exception:
             pass
@@ -138,16 +139,7 @@ class MusicPlayer:
             return False
 
     def _apply_master_state_to_session(self):
-        if self.audio_session is None:
-            return False
-        try:
-            volume_control = self.audio_session.SimpleAudioVolume
-            volume_control.SetMasterVolume(self.target_volume / 100.0, None)
-            volume_control.SetMute(self.target_muted, None)
-            self._apply_player_fallback_audio_state()
-            return True
-        except Exception:
-            return False
+        return False
 
     def refresh_audio_session(self, force=False):
         if force or self.audio_session is None:
@@ -161,25 +153,65 @@ class MusicPlayer:
 
     def get_audio_state(self):
         session = self.refresh_audio_session()
+        vlc_volume = self.target_volume
+        vlc_muted = self.target_muted
+        windows_session_volume = None
+        windows_session_muted = None
+        try:
+            reported_volume = self.player.audio_get_volume()
+            if reported_volume is not None and int(reported_volume) >= 0:
+                vlc_volume = max(0, min(100, int(reported_volume)))
+            vlc_muted = bool(self.player.audio_get_mute())
+        except Exception:
+            pass
         if session is not None:
             try:
                 session_state = getattr(session, "State", None)
                 if session_state == 1:
-                    volume = int(round(session.SimpleAudioVolume.GetMasterVolume() * 100))
-                    muted = bool(session.SimpleAudioVolume.GetMute())
-                    self.target_volume = max(0, min(100, volume))
-                    self.target_muted = muted
+                    windows_session_volume = max(0, min(100, int(round(session.SimpleAudioVolume.GetMasterVolume() * 100))))
+                    windows_session_muted = bool(session.SimpleAudioVolume.GetMute())
             except Exception:
                 self.audio_session = None
                 self.audio_session_identity_applied = False
                 session = None
+                windows_session_volume = None
+                windows_session_muted = None
+        self._write_audio_diagnostic(vlc_volume, vlc_muted, windows_session_volume, windows_session_muted, session is not None)
         return {
             "volume": self.target_volume,
             "muted": self.target_muted,
+            "backend_volume": vlc_volume,
+            "backend_muted": vlc_muted,
+            "vlc_volume": vlc_volume,
+            "vlc_muted": vlc_muted,
+            "windows_session_volume": windows_session_volume,
+            "windows_session_muted": windows_session_muted,
             "session_bound": session is not None,
             "identity_applied": self.audio_session_identity_applied,
             "display_name": self.audio_session_name if session is not None else "",
         }
+
+    def _write_audio_diagnostic(self, vlc_volume, vlc_muted, windows_session_volume, windows_session_muted, session_bound):
+        signature = (
+            int(self.target_volume),
+            bool(self.target_muted),
+            int(vlc_volume) if vlc_volume is not None else None,
+            bool(vlc_muted),
+            int(windows_session_volume) if windows_session_volume is not None else None,
+            bool(windows_session_muted) if windows_session_muted is not None else None,
+            bool(session_bound),
+        )
+        if signature == self.last_audio_diagnostic_signature:
+            return
+        self.last_audio_diagnostic_signature = signature
+        write_diagnostics_line(
+            "[Audio] "
+            f"desired={self.target_volume}% muted={self.target_muted} "
+            f"vlc={vlc_volume}% vlc_muted={vlc_muted} "
+            f"windows_session={windows_session_volume if windows_session_volume is not None else 'n/a'}% "
+            f"windows_muted={windows_session_muted if windows_session_muted is not None else 'n/a'} "
+            f"session_bound={session_bound}"
+        )
 
     def _clean_youtube_url(self, url: str) -> str:
         return clean_youtube_watch_url(url)
@@ -229,10 +261,12 @@ class MusicPlayer:
             raise RuntimeError("No track is loaded")
         self.current_media = self.instance.media_new(self.current_track.audio_url)
         self.player.set_media(self.current_media)
+        self._apply_player_fallback_audio_state()
         result = self.player.play()
         if result == -1:
             raise RuntimeError("VLC refused to start playback")
         self.refresh_audio_session(force=True)
+        self._apply_master_state_to_session()
         return self.current_track
 
     def play(self, query_or_url: str) -> TrackInfo:

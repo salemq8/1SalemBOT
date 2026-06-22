@@ -100,22 +100,42 @@ class TelemetryV18Tests(unittest.TestCase):
             self.assertIn("first_seen", requester.calls[0]["json"])
             self.assertNotIn("first_seen", requester.calls[1]["json"])
             content = log_file.read_text(encoding="utf-8")
-            self.assertIn("Telemetry startup", content)
-            self.assertIn("install_id loaded", content)
+            self.assertIn("Telemetry sync requested", content)
+            self.assertIn("Telemetry sync succeeded: upserted (insert=201, update=204)", content)
+            self.assertNotIn("22222222-2222-4222-8222-222222222222", content)
+            self.assertNotIn("channel_name: channel", content)
+            self.assertNotIn("bot_name: bot", content)
+            self.assertNotIn("Supabase URL present", content)
+            self.assertNotIn("Insert request payload", content)
+            self.assertNotIn("Telemetry exception stack trace", content)
+
+    def test_developer_diagnostics_are_detailed_but_redacted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_file = Path(temp_dir) / "telemetry.json"
+            log_file = Path(temp_dir) / "logs" / "telemetry.log"
+            storage_file.write_text('{"install_id": "44444444-4444-4444-8444-444444444444"}', encoding="utf-8")
+            requester = FakeRequester([FakeResponse(201, None, text='{"ok":true}'), FakeResponse(204, None)])
+            service = telemetry.SupabaseTelemetryService(
+                storage_file=storage_file,
+                log_file=log_file,
+                request_func=requester,
+                developer_diagnostics=True,
+            )
+
+            result = service.sync_installation({"channel_login": "channel", "bot_login": "bot"})
+
+            self.assertTrue(result.ok)
+            content = log_file.read_text(encoding="utf-8")
             self.assertIn("Supabase URL present: yes", content)
-            self.assertIn("Supabase URL loaded", content)
-            self.assertIn("Supabase key present: yes", content)
             self.assertIn("Supabase key loaded: yes (masked)", content)
-            self.assertIn("channel_name: channel", content)
-            self.assertIn("bot_name: bot", content)
-            self.assertIn("app_version:", content)
-            self.assertIn("os_version:", content)
-            self.assertIn("Insert/update attempt", content)
-            self.assertIn("Insert request payload", content)
-            self.assertIn("Update request payload", content)
+            self.assertIn("install_id loaded: <masked>...444444", content)
+            self.assertIn("Insert request payload fields:", content)
+            self.assertIn("Update request payload fields:", content)
             self.assertIn("Insert HTTP status code: 201", content)
-            self.assertIn("Insert response body", content)
-            self.assertIn("Update HTTP status code: 204", content)
+            self.assertIn("Insert response body:", content)
+            self.assertNotIn("44444444-4444-4444-8444-444444444444", content)
+            self.assertNotIn("channel_name: channel", content)
+            self.assertNotIn("bot_name: bot", content)
 
     def test_missing_installation_inserts_then_reuses_same_install_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -145,18 +165,23 @@ class TelemetryV18Tests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertTrue(log_file.exists())
             content = log_file.read_text(encoding="utf-8")
-            self.assertIn("Telemetry startup", content)
-            self.assertIn("install_id generated", content)
-            self.assertIn("Supabase URL present: yes", content)
-            self.assertIn("Supabase URL loaded", content)
-            self.assertIn("Supabase key present: yes", content)
-            self.assertIn("Supabase key loaded: yes (masked)", content)
-            self.assertIn("Insert/update attempt", content)
-            self.assertIn("Insert request payload", content)
-            self.assertIn("Update request payload prepared", content)
-            self.assertIn("Insert HTTP status code: 401", content)
-            self.assertIn('Insert response body: {"message":"permission denied"}', content)
-            self.assertIn("Telemetry exception stack trace", content)
+            self.assertIn("Telemetry sync requested", content)
+            self.assertIn("Telemetry sync failed: category=http status=401", content)
+            self.assertNotIn("Insert request payload", content)
+            self.assertNotIn('{"message":"permission denied"}', content)
+            self.assertNotIn("Telemetry exception stack trace", content)
+
+    def test_telemetry_log_rotates_when_size_limit_is_reached(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_file = Path(temp_dir) / "logs" / "telemetry.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("x" * 128, encoding="utf-8")
+
+            telemetry.append_telemetry_log("after rotation", log_file=log_file, max_bytes=32)
+
+            self.assertTrue(log_file.exists())
+            self.assertTrue(log_file.with_name("telemetry.log.1").exists())
+            self.assertIn("after rotation", log_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ class Bridge(QObject):
     update_download_result_signal = Signal(object)
     music_playlist_signal = Signal(object)
     music_track_request_signal = Signal(object)
+    twitch_device_auth_signal = Signal(object)
 
 
 class ThumbnailWidget(QWidget):

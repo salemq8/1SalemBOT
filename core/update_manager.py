@@ -10,11 +10,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .version import APP_VERSION, parse_version
+from .version import APP_VERSION, APP_VERSION_CHANNEL, CHANNEL_BETA, CHANNEL_STABLE, parse_version
 
 
 DEFAULT_UPDATE_PROVIDER = "github"
-DEFAULT_RELEASE_CHANNEL = "stable"
+CHANNEL_PREVIEW = "preview"
+DEFAULT_RELEASE_CHANNEL = CHANNEL_PREVIEW if APP_VERSION_CHANNEL == CHANNEL_BETA else CHANNEL_STABLE
 DEFAULT_UPDATE_URL = "https://github.com/salemq8/1SalemBOT/releases/latest/download/version.json"
 LEGACY_UPDATE_URLS = {
     "https://github.com/1SalemQ8/1SalemBOT/releases/latest/download/version.json",
@@ -81,7 +82,7 @@ class UpdateRelease:
     release_url: str = ""
     prerelease: bool = False
     draft: bool = False
-    channel: str = DEFAULT_RELEASE_CHANNEL
+    channel: str = CHANNEL_STABLE
     assets: tuple = field(default_factory=tuple)
 
     @property
@@ -124,6 +125,16 @@ def default_update_config():
     return UpdateConfig()
 
 
+def normalize_update_channel(value, default=None):
+    default_channel = DEFAULT_RELEASE_CHANNEL if default is None else default
+    channel = str(value or default_channel).strip().lower()
+    if channel in {"beta", "preview", "prerelease"}:
+        return CHANNEL_PREVIEW
+    if channel in {"stable", "release", "public"}:
+        return CHANNEL_STABLE
+    return default_channel
+
+
 def build_update_config(settings=None):
     settings = settings or {}
     update_settings = settings.get("updates") if isinstance(settings.get("updates"), dict) else {}
@@ -133,7 +144,7 @@ def build_update_config(settings=None):
     return UpdateConfig(
         update_provider=str(update_settings.get("update_provider") or DEFAULT_UPDATE_PROVIDER).strip() or DEFAULT_UPDATE_PROVIDER,
         current_version=APP_VERSION,
-        release_channel=str(update_settings.get("release_channel") or DEFAULT_RELEASE_CHANNEL).strip() or DEFAULT_RELEASE_CHANNEL,
+        release_channel=normalize_update_channel(update_settings.get("release_channel")),
         update_url=configured_update_url,
         enabled=bool(update_settings.get("enabled", True)),
         auto_update_enabled=bool(update_settings.get("auto_update_enabled", False)),
@@ -294,7 +305,7 @@ def parse_version_json(payload):
         release_url=str(payload.get("release_url") or payload.get("html_url") or "").strip(),
         prerelease=bool(payload.get("prerelease", False)),
         draft=bool(payload.get("draft", False)),
-        channel=str(payload.get("channel") or DEFAULT_RELEASE_CHANNEL).strip() or DEFAULT_RELEASE_CHANNEL,
+        channel=str(payload.get("channel") or CHANNEL_STABLE).strip() or CHANNEL_STABLE,
         assets=assets,
     )
 
@@ -375,9 +386,17 @@ class UpdateManager:
             return False
         if release.draft:
             return False
-        if release.prerelease and self.config.release_channel != "preview":
-            return False
-        if release.channel and release.channel not in {self.config.release_channel, "stable"}:
+        configured_channel = normalize_update_channel(self.config.release_channel)
+        release_channel = normalize_update_channel(release.channel or CHANNEL_STABLE, default=CHANNEL_STABLE)
+        if configured_channel == CHANNEL_STABLE:
+            if release.prerelease:
+                return False
+            if release_channel != CHANNEL_STABLE:
+                return False
+        elif configured_channel == CHANNEL_PREVIEW:
+            if release_channel not in {CHANNEL_STABLE, CHANNEL_PREVIEW}:
+                return False
+        else:
             return False
         return bool(release.version)
 
@@ -409,6 +428,8 @@ class UpdateManager:
     def download_installer(self, asset, progress_callback=None, cancel_event=None, status_callback=None):
         if not isinstance(asset, UpdateAsset) or not asset.download_url:
             raise UpdateError("No Windows installer asset is available for this update.")
+        if not str(asset.sha256 or "").strip():
+            raise UpdateError("Installer checksum is required before installing official updates.")
         temp_dir = Path(tempfile.mkdtemp(prefix="1SalemBOT-update-"))
         target_name = asset.name or "1SalemBOT_Setup_Update.exe"
         target_path = temp_dir / target_name
@@ -435,7 +456,7 @@ class UpdateManager:
 
             if status_callback:
                 status_callback("Verifying download...", 100)
-            if asset.sha256 and sha.hexdigest().lower() != asset.sha256:
+            if sha.hexdigest().lower() != asset.sha256:
                 raise UpdateError("Downloaded installer checksum did not match version.json.")
             os.replace(temp_path, target_path)
             return str(target_path)

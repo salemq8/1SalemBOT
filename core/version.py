@@ -103,7 +103,7 @@ def artifact_version_tag(version, channel):
     version = str(version or DEFAULT_APP_VERSION).strip()
     channel = normalize_version_channel(channel)
     if channel == CHANNEL_BETA:
-        return f"{version}_Beta"
+        return f"{version}-Beta"
     return version
 
 

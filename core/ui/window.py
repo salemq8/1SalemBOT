@@ -89,6 +89,7 @@ from core.auth import (
     get_role_scopes,
     load_best_token,
     load_token_details,
+    refresh_role_token,
     validate_token,
 )
 from core.twitch_api import (
@@ -109,7 +110,9 @@ from core.support import (
     pending_crash_report,
     support_mailto_url,
 )
-from core.telemetry import sync_installation_async
+from core.tasks import BackgroundTaskManager
+from core.telemetry import sync_installation
+from core.runtime_logging import flush_repeated_log_summaries, route_diagnostic_line
 
 from .chat_renderer import ChatRenderer
 from .constants import (
@@ -186,6 +189,7 @@ TRANSLATION_SOURCE_ROLE = Qt.UserRole + 417
 MAX_LIVE_LOG_LINES = 200
 MAX_PENDING_LOG_LINES = 400
 LIVE_LOG_FLUSH_INTERVAL_MS = 750
+LIVE_LOG_REPEAT_SUMMARY_EVERY = 25
 DEFAULT_LOG_RETENTION_MINUTES = 60
 LOG_RETENTION_OPTIONS = (
     ("30 minutes", 30),
@@ -193,11 +197,18 @@ LOG_RETENTION_OPTIONS = (
     ("6 hours", 360),
     ("24 hours", 1440),
 )
+PROCESS_STOP_TIMEOUT_SECONDS = 5
+PROCESS_CLOSE_TIMEOUT_SECONDS = 2
+PROCESS_KILL_TIMEOUT_SECONDS = 1
+STARTUP_AUTO_RESTART_DELAY_MS = 3000
+BOT_RUNTIME_HEARTBEAT_STALE_SECONDS = 75
+BOT_HEALTH_RECONNECT_DELAYS_SECONDS = (5, 15, 30, 60)
 
 
 class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMixin, QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         ensure_app_files(
             SETTINGS_FILE,
             USERS_FILE,
@@ -220,8 +231,13 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
 
         self.process = None
         self.alerts_process = None
+        self._closing = False
         self.alerts_autostart_attempted = False
         self.restart_in_progress = False
+        self.bot_health_reconnect_attempts = 0
+        self.bot_health_next_reconnect_at = 0.0
+        self.bot_health_last_reason = ""
+        self.startup_auto_restart_show_scheduled = False
         self.startup_auto_restart_scheduled = False
         self.startup_auto_restart_ran = False
         self.bridge = Bridge()
@@ -240,6 +256,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.bridge.update_download_result_signal.connect(self.handle_update_download_result)
         self.bridge.music_playlist_signal.connect(self.apply_playlist_import_result)
         self.bridge.music_track_request_signal.connect(self.apply_track_request_result)
+        self.bridge.twitch_device_auth_signal.connect(self.handle_twitch_device_auth_event)
 
         self.settings = load_json(SETTINGS_FILE, {})
         self.language = normalize_language(self.settings.get("language", DEFAULT_LANGUAGE))
@@ -262,9 +279,20 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.dashboard_state = load_dashboard_state()
         self.users_data = load_json(USERS_FILE, {})
         self.viewer_relationships_state = load_json(VIEWER_RELATIONSHIPS_FILE, default_viewer_relationships_state())
+        self.file_signature_cache = {}
+        self.dashboard_ui_signatures = {}
+        self.alert_feed_signature = None
+        self.alert_feed_render_signature = None
+        self.alert_status_signature = None
+        self.music_command_signature = None
+        self.music_queue_render_signature = None
+        self.viewer_dashboard_signature = None
 
         self.music_player = None
         self.music_player_initialized = False
+        self.music_playback_generation = 0
+        self.music_playback_lock = threading.RLock()
+        self.music_skip_in_progress = False
         self.music_queue = []
         self.music_queue_titles = {}
         self.current_track_query = ""
@@ -296,6 +324,16 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             BOT_AUTH_ROLE: 0,
             CHANNEL_AUTH_ROLE: 0,
         }
+        self.account_profile_lookup_signatures = {
+            BOT_AUTH_ROLE: "",
+            CHANNEL_AUTH_ROLE: "",
+        }
+        self.account_profile_failure_state = {
+            BOT_AUTH_ROLE: {"error": "", "next_retry_at": 0.0},
+            CHANNEL_AUTH_ROLE: {"error": "", "next_retry_at": 0.0},
+        }
+        self.twitch_device_auth_request_ids = {BOT_AUTH_ROLE: 0, CHANNEL_AUTH_ROLE: 0}
+        self.twitch_device_auth_dialogs = {BOT_AUTH_ROLE: None, CHANNEL_AUTH_ROLE: None}
         self.music_enabled = bool(self.settings.get("music_enabled", True))
         self.audio_volume = max(0, min(100, int(self.settings.get("audio_volume", 100))))
         self.audio_muted = bool(self.settings.get("audio_muted", False))
@@ -328,15 +366,18 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.session_started_at = datetime.now()
         self.alert_feed_filter = str(self.settings.get("alert_feed_filter", DEFAULT_ALERT_FEED_FILTER) or DEFAULT_ALERT_FEED_FILTER)
         self.alert_feed_items = []
+        self.alert_feed_loaded = False
         self.rendered_alert_log_ids = set()
         self.log_retention_minutes = self.resolve_log_retention_minutes(
             self.settings.get("log_retention_minutes", DEFAULT_LOG_RETENTION_MINUTES)
         )
         self.pending_log_lines = []
         self.live_log_entries = []
+        self.live_log_repeat_state = {}
         self.log_flush_timer = QTimer(self)
         self.log_flush_timer.setSingleShot(True)
         self.log_flush_timer.timeout.connect(self.flush_pending_log_lines)
+        self.task_manager = BackgroundTaskManager(self)
 
         self.chat_renderer = ChatRenderer(
             client_id=CLIENT_ID,
@@ -348,8 +389,8 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
 
         self.build_ui()
         self.load_initial_values()
-        self.start_telemetry_sync()
         self.start_timers()
+        QTimer.singleShot(900, self.start_telemetry_sync)
 
     # =========================
     # Lifecycle helpers
@@ -371,9 +412,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             self.music_player_initialized = True
             self.music_player = self.create_music_player()
             if self.music_player is not None:
-                self.music_player.set_volume(self.audio_volume)
-                self.music_player.set_muted(self.audio_muted)
-                self.apply_audio_state_from_player(self.music_player.get_audio_state(), persist=False)
+                self.apply_master_volume_to_player("player_create", persist=False)
         return self.music_player
 
     def start_telemetry_sync(self):
@@ -383,12 +422,26 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         }
 
         def on_result(result):
+            if result is None:
+                return
             if getattr(result, "ok", False):
                 self.bridge.log_signal.emit(f"[Telemetry] Usage tracking {result.action}.")
             else:
                 self.bridge.log_signal.emit("[Telemetry] Usage tracking skipped.")
 
-        self.telemetry_thread = sync_installation_async(settings_snapshot, on_result=on_result)
+        def on_error(_error_text):
+            self.bridge.log_signal.emit("[Telemetry] Usage tracking skipped.")
+
+        task_manager = getattr(self, "task_manager", None)
+        if task_manager is None:
+            on_result(sync_installation(settings_snapshot))
+            return
+        task_manager.start(
+            "telemetry_sync",
+            lambda cancel_event: None if cancel_event.is_set() else sync_installation(settings_snapshot),
+            on_success=on_result,
+            on_error=on_error,
+        )
 
     def get_app_icon(self):
         for path in [WINDOW_ICON_ICO, WINDOW_ICON_PNG, WINDOW_ICON_JPG, WINDOW_ICON_JPEG]:
@@ -438,19 +491,108 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         return target
 
     def closeEvent(self, event):
+        self._closing = True
         try:
-            if self.process is not None and self.process.poll() is None:
-                self.process.terminate()
-                clear_bot_runtime_state(self.process.pid)
+            for value in list(vars(self).values()):
+                if isinstance(value, QTimer):
+                    value.stop()
         except Exception:
             pass
         try:
-            if self.alerts_process is not None and self.alerts_process.poll() is None:
-                self.alerts_process.terminate()
-                clear_alert_runtime_state(self.alerts_process.pid)
+            if hasattr(self, "task_manager"):
+                self.task_manager.shutdown()
+        except Exception:
+            pass
+        try:
+            player = getattr(self, "music_player", None)
+            if player is not None:
+                player.stop()
+                player.clear_current_track()
+        except Exception:
+            pass
+        try:
+            self.shutdown_child_processes()
+        except Exception:
+            pass
+        try:
+            flush_repeated_log_summaries()
         except Exception:
             pass
         super().closeEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.startup_auto_restart_show_scheduled:
+            return
+        self.startup_auto_restart_show_scheduled = True
+        QTimer.singleShot(0, self.schedule_startup_auto_restart)
+
+    def stop_process_with_timeout(
+        self,
+        process,
+        *,
+        terminate_timeout=PROCESS_STOP_TIMEOUT_SECONDS,
+        kill_timeout=PROCESS_KILL_TIMEOUT_SECONDS,
+    ):
+        if process is None:
+            return True
+        try:
+            if process.poll() is not None:
+                return True
+        except Exception:
+            return False
+
+        try:
+            process.terminate()
+        except Exception:
+            pass
+
+        try:
+            process.wait(timeout=terminate_timeout)
+        except subprocess.TimeoutExpired:
+            pid = getattr(process, "pid", 0)
+            force_stopped = terminate_bot_process(pid) if pid else False
+            if not force_stopped:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            try:
+                process.wait(timeout=kill_timeout)
+            except Exception:
+                pass
+        except Exception:
+            return False
+
+        try:
+            return process.poll() is not None
+        except Exception:
+            return False
+
+    def shutdown_child_processes(self):
+        bot_process = getattr(self, "process", None)
+        if bot_process is not None:
+            bot_pid = getattr(bot_process, "pid", None)
+            bot_stopped = self.stop_process_with_timeout(
+                bot_process,
+                terminate_timeout=PROCESS_CLOSE_TIMEOUT_SECONDS,
+                kill_timeout=PROCESS_KILL_TIMEOUT_SECONDS,
+            )
+            if bot_stopped and bot_pid:
+                clear_bot_runtime_state(bot_pid)
+                self.process = None
+
+        alerts_process = getattr(self, "alerts_process", None)
+        if alerts_process is not None:
+            alerts_pid = getattr(alerts_process, "pid", None)
+            alerts_stopped = self.stop_process_with_timeout(
+                alerts_process,
+                terminate_timeout=PROCESS_CLOSE_TIMEOUT_SECONDS,
+                kill_timeout=PROCESS_KILL_TIMEOUT_SECONDS,
+            )
+            if alerts_stopped and alerts_pid:
+                clear_alert_runtime_state(alerts_pid)
+                self.alerts_process = None
 
     # =========================
     # Generic helpers
@@ -483,6 +625,11 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         text = str(text or "").strip()
         if not text:
             return
+        if route_diagnostic_line(text):
+            return
+        text = self.prepare_live_log_line(text)
+        if not text:
+            return
         self.pending_log_lines.append((time.monotonic(), text))
         if len(self.pending_log_lines) > MAX_PENDING_LOG_LINES:
             self.pending_log_lines = self.pending_log_lines[-MAX_PENDING_LOG_LINES:]
@@ -501,6 +648,25 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         elif not timer.isActive():
             timer.start(LIVE_LOG_FLUSH_INTERVAL_MS)
 
+    def prepare_live_log_line(self, text):
+        now = time.monotonic()
+        repeat_state = getattr(self, "live_log_repeat_state", None)
+        if repeat_state is None:
+            self.live_log_repeat_state = {}
+            repeat_state = self.live_log_repeat_state
+        state = repeat_state.get(text)
+        if state is None:
+            repeat_state[text] = {"last_at": now, "suppressed": 0}
+            return text
+
+        state["last_at"] = now
+        state["suppressed"] = int(state.get("suppressed") or 0) + 1
+        if state["suppressed"] >= LIVE_LOG_REPEAT_SUMMARY_EVERY:
+            suppressed = state["suppressed"]
+            state["suppressed"] = 0
+            return f"Repeated {suppressed} times: {text}"
+        return ""
+
     def flush_pending_log_lines(self):
         log_widget = getattr(self, "live_log", None)
         if log_widget is None:
@@ -512,9 +678,11 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         pruned = self.prune_live_log_entries()
         if not had_pending and not pruned:
             return
-        log_widget.setPlainText("\n".join(entry_text for _, entry_text in self.live_log_entries))
         scrollbar = log_widget.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        was_near_bottom = scrollbar.value() >= max(0, scrollbar.maximum() - 24)
+        log_widget.setPlainText("\n".join(entry_text for _, entry_text in self.live_log_entries))
+        if was_near_bottom:
+            scrollbar.setValue(scrollbar.maximum())
 
     def is_bot_process_running(self):
         if self.process is not None and self.process.poll() is None:
@@ -555,7 +723,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 self.auth_health_inflight[role] = False
                 self.set_role_auth_health(role, "disconnected", "No saved token")
                 continue
-            if self.auth_health_inflight.get(role) and not force:
+            if self.auth_health_inflight.get(role):
                 continue
             if not force and now - float(self.auth_health_last_check_at.get(role, 0.0) or 0.0) < 45:
                 continue
@@ -566,9 +734,19 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             self.auth_health_last_check_at[role] = now
             self.set_role_auth_health(role, "connecting", "Checking Twitch session")
 
-            def worker(role_name=role, role_token=token, role_request_id=request_id):
+            def worker(cancel_event=None, role_name=role, role_token=token, role_request_id=request_id):
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
                 try:
-                    validation = validate_token(role_token)
+                    try:
+                        validation = validate_token(role_token)
+                    except Exception as exc:
+                        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                        if status_code != 401:
+                            raise
+                        refreshed = refresh_role_token(role_name)
+                        role_token = refreshed.get("access_token") or role_token
+                        validation = validate_token(role_token)
                     granted_scopes = validation.get("scopes") or []
                     missing = [scope for scope in get_role_scopes(role_name) if scope not in granted_scopes]
                     if missing:
@@ -593,9 +771,38 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                         "state": "failed",
                         "message": f"Token validation failed: {exc}",
                     }
-                self.bridge.auth_health_signal.emit(payload)
+                return payload
 
-            threading.Thread(target=worker, daemon=True).start()
+            def on_result(payload):
+                if payload is not None:
+                    self.bridge.auth_health_signal.emit(payload)
+
+            def on_error(error_text, role_name=role, role_request_id=request_id):
+                summary = str(error_text or "Unknown auth error").strip().splitlines()[-1]
+                self.bridge.auth_health_signal.emit(
+                    {
+                        "role": role_name,
+                        "request_id": role_request_id,
+                        "state": "failed",
+                        "message": f"Token validation failed: {summary}",
+                    }
+                )
+
+            task_manager = getattr(self, "task_manager", None)
+            if task_manager is not None:
+                started = task_manager.start(
+                    f"auth_check_{role}",
+                    worker,
+                    on_success=on_result,
+                    on_error=on_error,
+                )
+                if not started:
+                    self.auth_health_inflight[role] = False
+                    if hasattr(self, "refresh_token_status"):
+                        self.refresh_token_status()
+                continue
+
+            threading.Thread(target=lambda: on_result(worker()), daemon=True).start()
 
     def _apply_auth_health_payload(self, payload):
         role = payload.get("role")
@@ -611,6 +818,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 self.ensure_alerts_listener()
             else:
                 self.update_alerts_status_ui()
+        self.update_runtime_timer_policy()
 
     def build_chat_asset_signature(self, entries):
         badge_keys = set()
@@ -669,7 +877,8 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.chat_asset_warmup_inflight = False
         self.chat_asset_signature = self.pending_chat_asset_signature
         self.pending_chat_asset_signature = None
-        self.refresh_dashboard()
+        if hasattr(self, "chat_live"):
+            self.refresh_dashboard_chat_preview(force=True)
 
 
 
@@ -1256,16 +1465,51 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         label.setWordWrap(True)
         return self.set_label_role(label, "infoValue")
 
+    def file_signature(self, path):
+        try:
+            stats = Path(path).stat()
+            return (int(stats.st_mtime_ns), int(stats.st_size))
+        except Exception:
+            return None
+
+    def cached_file_changed(self, key, path, *, force=False):
+        signature = self.file_signature(path)
+        previous = self.file_signature_cache.get(key)
+        if force or signature != previous:
+            self.file_signature_cache[key] = signature
+            return True, signature
+        return False, signature
+
+    def refresh_cached_runtime_state(self, *, force=False):
+        dashboard_changed, _ = self.cached_file_changed("dashboard_state", DASHBOARD_STATE_FILE, force=force)
+        if dashboard_changed:
+            self.dashboard_state = load_dashboard_state()
+
+        users_changed, _ = self.cached_file_changed("users", USERS_FILE, force=force)
+        if users_changed:
+            self.users_data = load_json(USERS_FILE, {})
+
+        return {"dashboard": dashboard_changed, "users": users_changed}
+
     def save_alert_settings(self):
         self.settings["alert_feed_filter"] = self.alert_feed_filter
         save_json(SETTINGS_FILE, self.settings)
 
     def load_alert_feed_items(self, force=False):
+        changed, signature = self.cached_file_changed("alerts", ALERTS_FILE, force=force)
+        if not changed and self.alert_feed_loaded:
+            return self.alert_feed_items
         self.alert_feed_items = list(load_alert_items(ALERTS_FILE))
+        self.alert_feed_loaded = True
+        self.alert_feed_signature = signature
         return self.alert_feed_items
 
     def alert_subscription_issues(self, alert_filter="All"):
-        status = load_alert_status(ALERT_STATUS_FILE)
+        changed, signature = self.cached_file_changed("alert_status", ALERT_STATUS_FILE)
+        if changed or not hasattr(self, "alert_status_cache"):
+            self.alert_status_cache = load_alert_status(ALERT_STATUS_FILE)
+            self.alert_status_signature = signature
+        status = getattr(self, "alert_status_cache", {})
         issues = []
         for event_type, entry in status.get("subscriptions", {}).items():
             if alert_filter != "All" and resolve_alert_type(event_type, "") != alert_filter:
@@ -1460,16 +1704,32 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 return self.localize("time.days_ago", count=count)
         return text
 
-    def log_rendered_alert_event(self, item):
+    def alert_render_log_key(self, item):
         event_type = str(item.get("event_type") or item.get("type") or "unknown").strip() or "unknown"
-        log_key = str(item.get("id") or f"{event_type}:{item.get('username','')}:{item.get('occurred_at','')}:{item.get('text','')}").strip()
-        if not log_key or log_key in self.rendered_alert_log_ids:
+        return str(item.get("id") or f"{event_type}:{item.get('username','')}:{item.get('occurred_at','')}:{item.get('text','')}").strip()
+
+    def log_rendered_alert_events(self, items, *, source="cached"):
+        if source == "cached" and getattr(self, "cached_alert_render_summary_logged", False):
             return
-        self.rendered_alert_log_ids.add(log_key)
-        self.append_log(f"[Alerts] Rendered alert event: {event_type}")
+        new_items = []
+        for item in list(items or []):
+            log_key = self.alert_render_log_key(item)
+            if not log_key or log_key in self.rendered_alert_log_ids:
+                continue
+            self.rendered_alert_log_ids.add(log_key)
+            new_items.append(item)
+        if not new_items:
+            return
+        counts = {}
+        for item in new_items:
+            event_type = str(item.get("event_type") or item.get("type") or "unknown").strip() or "unknown"
+            counts[event_type] = counts.get(event_type, 0) + 1
+        summary = ", ".join(f"{count} {event_type}" for event_type, count in sorted(counts.items()))
+        self.append_log(f"[Alerts] Rendered {len(new_items)} {source} events: {summary}")
+        if source == "cached":
+            self.cached_alert_render_summary_logged = True
 
     def build_alert_feed_row(self, item):
-        self.log_rendered_alert_event(item)
         row = QFrame()
         row.setProperty("surfaceRole", "subtle")
         row_layout = QHBoxLayout(row)
@@ -1525,8 +1785,20 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         if not hasattr(self, "alert_feed_rows_layout"):
             return
         self.load_alert_feed_items()
-        self.clear_layout_widgets(self.alert_feed_rows_layout)
         items = self.filtered_alert_feed_items()
+        render_signature = (
+            getattr(self, "alert_feed_signature", None),
+            getattr(self, "alert_status_signature", None),
+            getattr(self, "alert_feed_filter", DEFAULT_ALERT_FEED_FILTER),
+            tuple(
+                str(item.get("id") or self.alert_render_log_key(item))
+                for item in items
+            ),
+        )
+        if render_signature == getattr(self, "alert_feed_render_signature", None):
+            return
+        self.alert_feed_render_signature = render_signature
+        self.clear_layout_widgets(self.alert_feed_rows_layout)
         if not items:
             empty_label = QLabel()
             self.set_localized_text(empty_label, self.alert_filter_empty_message())
@@ -1537,6 +1809,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         else:
             for item in items:
                 self.alert_feed_rows_layout.addWidget(self.build_alert_feed_row(item))
+            self.log_rendered_alert_events(items, source="cached")
         self.alert_feed_rows_layout.addStretch()
         self.update_alert_summary_label()
 
@@ -2205,16 +2478,18 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
     def open_logs_folder(self):
         logs_dir = ensure_logs_dir()
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(logs_dir))):
-            self.append_log(f"[Support] Failed to open logs folder: {logs_dir}")
+            self.append_log("[Support] Failed to open logs folder")
             QMessageBox.warning(self, self.localize("Technical Support"), f"Could not open logs folder:\n{logs_dir}")
             return
-        self.append_log(f"[Support] Logs folder opened: {logs_dir}")
+        self.append_log("[Support] Logs folder opened")
 
     def copy_diagnostic_info(self):
         QApplication.clipboard().setText(diagnostic_summary())
         self.append_log("[Support] Diagnostic info copied")
 
     def show_pending_crash_dialog(self):
+        if getattr(self, "_closing", False):
+            return
         report = pending_crash_report()
         if not report:
             return
@@ -2230,7 +2505,10 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         logs_button = dialog.addButton(self.localize("Open Logs Folder"), QMessageBox.ActionRole)
         dismiss_button = dialog.addButton(self.localize("Dismiss"), QMessageBox.RejectRole)
         dialog.exec()
-        clicked = dialog.clickedButton()
+        try:
+            clicked = dialog.clickedButton()
+        except RuntimeError:
+            return
         if clicked is send_button:
             self.open_crash_report_email(crash_path)
         elif clicked is logs_button:
@@ -2277,12 +2555,14 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         checking = bool(getattr(self, "update_check_inflight", False))
         downloading = bool(getattr(self, "update_download_inflight", False))
         installing = bool(getattr(self, "update_install_inflight", False) or getattr(self, "installing_update", False))
+        updates_enabled = bool(getattr(self, "update_config", None) and self.update_config.enabled)
         if hasattr(self, "check_updates_button"):
-            self.check_updates_button.setEnabled(not checking and not downloading and not installing)
+            self.check_updates_button.setEnabled(updates_enabled and not checking and not downloading and not installing)
+            self.check_updates_button.setToolTip("" if updates_enabled else self.localize("Update checks are disabled"))
         if hasattr(self, "cancel_update_button"):
             self.cancel_update_button.setEnabled(downloading and not installing)
         if hasattr(self, "auto_update_checkbox"):
-            self.auto_update_checkbox.setEnabled(not downloading and not installing)
+            self.auto_update_checkbox.setEnabled(updates_enabled and not downloading and not installing)
 
     def check_for_updates(self, auto=False):
         if self.update_check_inflight or self.update_download_inflight:
@@ -2290,20 +2570,49 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             return
         self.update_manager = UpdateManager.from_settings(self.settings)
         self.update_config = self.update_manager.config
+        if not self.update_config.enabled:
+            self.update_check_inflight = False
+            self.sync_update_controls()
+            self.set_update_status("Update checks are disabled")
+            if not auto:
+                self.append_log("[Updates] Update checks are disabled")
+            return
         self.update_check_inflight = True
         self.sync_update_controls()
         self.set_update_status("Checking for updates...", 0)
         self.append_log("[Updates] Checking GitHub for updates")
 
-        def worker():
+        def worker(cancel_event):
+            if cancel_event.is_set():
+                return None
             try:
                 result = self.update_manager.check_for_updates()
                 result["auto"] = bool(auto)
-                self.bridge.update_check_result_signal.emit(result)
+                return result
             except Exception as exc:
-                self.bridge.update_check_result_signal.emit({"error": str(exc), "auto": bool(auto)})
+                return {"error": str(exc), "auto": bool(auto)}
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_result(result):
+            if result is not None:
+                self.bridge.update_check_result_signal.emit(result)
+
+        task_manager = getattr(self, "task_manager", None)
+        if task_manager is None:
+            threading.Thread(
+                target=lambda: on_result(worker(threading.Event())),
+                daemon=True,
+            ).start()
+            return
+        started = task_manager.start(
+            "update_check",
+            worker,
+            on_success=on_result,
+            on_error=lambda error_text: self.bridge.update_check_result_signal.emit({"error": error_text, "auto": bool(auto)}),
+        )
+        if not started:
+            self.update_check_inflight = False
+            self.sync_update_controls()
+            self.set_update_status("Update check already running.")
 
     def apply_update_status_payload(self, payload):
         if isinstance(payload, dict):
@@ -2481,6 +2790,9 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         QTimer.singleShot(500, self.close)
 
     def sync_scroll_html(self, widget: QTextEdit, new_html: str):
+        if widget.property("lastHtmlSignature") == hash(new_html):
+            return
+        widget.setProperty("lastHtmlSignature", hash(new_html))
         scrollbar = widget.verticalScrollBar()
         old_value = scrollbar.value()
         old_max = scrollbar.maximum()
@@ -2658,7 +2970,11 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         if not channel_token:
             return "disconnected", "Alerts: Disconnected", "Channel Account not connected", "danger"
 
-        status = load_alert_status(ALERT_STATUS_FILE)
+        changed, signature = self.cached_file_changed("alert_status", ALERT_STATUS_FILE)
+        if changed or not hasattr(self, "alert_status_cache"):
+            self.alert_status_cache = load_alert_status(ALERT_STATUS_FILE)
+            self.alert_status_signature = signature
+        status = getattr(self, "alert_status_cache", {})
         listener = status.get("listener", {})
         listener_state = str(listener.get("state") or "").strip()
         message = str(listener.get("message") or "").strip()
@@ -2704,7 +3020,9 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
 
         runtime_state = get_active_alert_runtime_state()
         if runtime_state.get("pid") and not force:
+            self.external_alert_runtime_active = True
             self.update_alerts_status_ui()
+            self.update_runtime_timer_policy()
             return
 
         if self.alerts_autostart_attempted and not force:
@@ -2733,13 +3051,16 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 creationflags=creation_flags,
             )
             write_alert_runtime_state(self.alerts_process.pid, " ".join(command))
+            self.external_alert_runtime_active = False
             self.append_log(f"[ALERTS] Alerts listener started (PID {self.alerts_process.pid})")
             threading.Thread(target=self.read_alerts_output, args=(self.alerts_process,), daemon=True).start()
         except Exception as exc:
             self.alerts_process = None
+            self.external_alert_runtime_active = False
             clear_alert_runtime_state()
             self.append_log(f"[ERROR] Failed to start alerts listener: {exc}")
         self.update_alerts_status_ui()
+        self.update_runtime_timer_policy()
 
     def stop_alerts_listener(self):
         running_process = self.alerts_process if self.alerts_process is not None and self.alerts_process.poll() is None else None
@@ -2750,13 +3071,11 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             return
         try:
             if running_process is not None:
-                running_process.terminate()
-                try:
-                    running_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    running_process.kill()
-                clear_alert_runtime_state(running_process.pid)
-                self.append_log("[ALERTS] Alerts listener stopped")
+                if self.stop_process_with_timeout(running_process):
+                    clear_alert_runtime_state(running_process.pid)
+                    self.append_log("[ALERTS] Alerts listener stopped")
+                else:
+                    self.append_log("[ERROR] Failed to stop alerts listener")
             else:
                 pid = runtime_state.get("pid")
                 if terminate_bot_process(pid):
@@ -2766,7 +3085,9 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 clear_alert_runtime_state(pid)
         finally:
             self.alerts_process = None
+            self.external_alert_runtime_active = False
             self.update_alerts_status_ui()
+            self.update_runtime_timer_policy()
 
     def poll_alerts_process(self):
         if self.alerts_process is not None:
@@ -2777,25 +3098,30 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             clear_alert_runtime_state(self.alerts_process.pid)
             self.append_log(f"[ALERTS] Alerts listener exited with code {return_code}")
             self.alerts_process = None
+            self.external_alert_runtime_active = False
             self.update_alerts_status_ui()
+            self.update_runtime_timer_policy()
             return
 
-        if load_token_details(CHANNEL_AUTH_ROLE).get("access_token"):
+        channel_health = getattr(self, "auth_health_state", {}).get(CHANNEL_AUTH_ROLE, {})
+        if load_token_details(CHANNEL_AUTH_ROLE).get("access_token") and channel_health.get("state") == "connected":
             runtime_state = get_active_alert_runtime_state()
             if runtime_state.get("pid"):
+                self.external_alert_runtime_active = True
                 self.update_alerts_status_ui()
             else:
                 self.ensure_alerts_listener()
         else:
             self.update_alerts_status_ui()
+            self.update_runtime_timer_policy()
 
     def start_bot(self):
         self.append_log("[BOT] Start requested")
         bot_token_details = load_token_details(BOT_AUTH_ROLE)
         bot_token = bot_token_details.get("access_token")
         if not bot_token:
-            self.append_log(f"[ERROR] Bot token not found. Checked: {bot_token_details.get('path')}")
-            return
+            self.append_log("[ERROR] Bot token not found. Connect Bot Account first.")
+            return False
 
         channel_token_details = load_token_details(CHANNEL_AUTH_ROLE)
         channel_token = channel_token_details.get("access_token")
@@ -2804,24 +3130,24 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         channel_login = self.settings_channel_login.text().strip() or self.channel_login_entry.text().strip()
         if not bot_login or not channel_login:
             self.append_log("[ERROR] Set both Bot Login and Channel Login before starting the bot")
-            return
+            return False
 
         self.save_all_settings()
         openai_key = load_json(SETTINGS_FILE, {}).get("openai_api_key", "").strip()
         if not openai_key:
             self.append_log("[ERROR] OpenAI API key is missing")
-            return
+            return False
 
         if self.process is not None and self.process.poll() is None:
             self.append_log(f"[BOT] Bot already running (PID {self.process.pid})")
-            return
+            return False
 
         runtime_state = get_active_bot_runtime_state()
         if runtime_state.get("pid"):
             self.append_log(
                 f"[BOT] Another bot process is already running (PID {runtime_state.get('pid')}). Stop it before starting a new one."
             )
-            return
+            return False
 
         try:
             self.append_log("[TWITCH] Connecting to Twitch...")
@@ -2842,6 +3168,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 creationflags=creation_flags,
             )
             write_bot_runtime_state(self.process.pid, " ".join(self.get_backend_command()))
+            self.external_bot_runtime_active = False
             self.set_status(True)
             self.append_log(f"[BOT] Bot started (PID {self.process.pid})")
             self.append_log(
@@ -2853,14 +3180,18 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
                 )
             else:
                 self.append_log(
-                    f"[TWITCH] Channel account not connected. Starting in limited mode. Expected file: {channel_token_details.get('path')}"
-                )
+                    "[TWITCH] Channel account not connected. Starting in limited mode."
+            )
             threading.Thread(target=self.read_output, daemon=True).start()
+            self.update_runtime_timer_policy()
+            return True
         except Exception as exc:
             self.append_log(f"[ERROR] Failed to start bot: {exc}")
             self.process = None
             clear_bot_runtime_state()
             self.set_status(False)
+            self.update_runtime_timer_policy()
+            return False
 
     def stop_bot(self):
         running_process = self.process if self.process is not None and self.process.poll() is None else None
@@ -2872,13 +3203,11 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
 
         try:
             if running_process is not None:
-                running_process.terminate()
-                try:
-                    running_process.wait(timeout=5)
-                except Exception:
-                    running_process.kill()
-                clear_bot_runtime_state(running_process.pid)
-                self.append_log("[BOT] Bot stopped")
+                if self.stop_process_with_timeout(running_process):
+                    clear_bot_runtime_state(running_process.pid)
+                    self.append_log("[BOT] Bot stopped")
+                else:
+                    self.append_log("[ERROR] Failed to stop bot")
             else:
                 pid = runtime_state.get("pid")
                 if terminate_bot_process(pid):
@@ -2890,22 +3219,56 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             self.append_log(f"[ERROR] Failed to stop bot: {exc}")
         finally:
             self.process = None
+            self.external_bot_runtime_active = False
             self.set_status(False)
+            self.update_runtime_timer_policy()
 
     def restart_bot(self):
         self.request_bot_restart(source="manual")
 
+    def startup_auto_restart_skip_reason(self):
+        if getattr(self, "_closing", False):
+            return "app closing"
+        if not bool(getattr(self, "auto_restart_bot_on_startup", True)):
+            return "disabled"
+        if self.restart_in_progress:
+            return "another restart is already running"
+
+        bot_token_details = load_token_details(BOT_AUTH_ROLE)
+        if not bot_token_details.get("access_token"):
+            return "Bot Account not connected"
+
+        bot_login = self.current_bot_login()
+        channel_login = self.current_channel_login()
+        if not bot_login or not channel_login:
+            return "Bot Login or Channel Login missing"
+
+        openai_key = ""
+        openai_entry = getattr(self, "openai_key_entry", None)
+        if openai_entry is not None:
+            openai_key = openai_entry.text().strip()
+        if not openai_key:
+            openai_key = str((self.settings or {}).get("openai_api_key") or "").strip()
+        if not openai_key:
+            return "OpenAI API key missing"
+
+        return ""
+
     def request_bot_restart(self, source="manual"):
         if self.restart_in_progress:
             if source == "startup":
-                self.append_log("[BOOT] Automatic startup restart ignored because another restart is already running.")
+                self.append_log("[BOOT] Startup auto restart skipped: another restart is already running.")
+            elif source == "health":
+                return False
             else:
                 self.append_log("[BOT] Manual restart ignored because another restart is already running.")
             return False
 
         self.restart_in_progress = True
         if source == "startup":
-            self.append_log("[BOOT] Automatic startup restart triggered.")
+            self.append_log("[BOOT] Startup auto restart starting bot.")
+        elif source == "health":
+            self.append_log("[BOT] Bot connection stale, reconnecting")
         else:
             self.append_log("[BOT] Manual restart requested.")
 
@@ -2917,48 +3280,120 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         QTimer.singleShot(700, lambda: self.complete_bot_restart(source))
 
     def complete_bot_restart(self, source):
+        started = False
         try:
-            self.start_bot()
+            started = bool(self.start_bot())
         finally:
             self.restart_in_progress = False
             if source == "startup":
-                self.append_log("[BOOT] Automatic startup restart completed.")
+                if started:
+                    self.append_log("[BOOT] Startup auto restart completed.")
+                else:
+                    self.append_log("[BOOT] Startup auto restart failed: bot did not start.")
+            elif source == "health":
+                if started:
+                    self.bot_health_reconnect_attempts = 0
+                    self.bot_health_next_reconnect_at = 0.0
+                    self.append_log("[BOT] Bot reconnected")
+                else:
+                    attempts = int(getattr(self, "bot_health_reconnect_attempts", 0) or 0) + 1
+                    self.bot_health_reconnect_attempts = attempts
+                    delays = BOT_HEALTH_RECONNECT_DELAYS_SECONDS
+                    delay = delays[min(attempts - 1, len(delays) - 1)]
+                    self.bot_health_next_reconnect_at = time.monotonic() + delay
+                    self.append_log("[BOT] Bot reconnect failed: bot did not start")
             else:
                 self.append_log("[BOT] Manual restart completed.")
 
     def schedule_startup_auto_restart(self):
         if not bool(getattr(self, "auto_restart_bot_on_startup", True)):
-            self.append_log("[BOOT] Automatic startup restart disabled in settings.")
+            self.append_log("[BOOT] Startup auto restart skipped: disabled.")
             return
         if self.startup_auto_restart_scheduled or self.startup_auto_restart_ran:
             return
         self.startup_auto_restart_scheduled = True
-        self.append_log("[BOOT] Waiting 3 seconds before automatic startup restart...")
+        self.append_log("[BOOT] Startup auto restart scheduled.")
         self.schedule_startup_auto_restart_timer()
 
     def schedule_startup_auto_restart_timer(self):
-        QTimer.singleShot(3000, self.run_startup_auto_restart)
+        QTimer.singleShot(STARTUP_AUTO_RESTART_DELAY_MS, self.run_startup_auto_restart)
 
     def run_startup_auto_restart(self):
         if self.startup_auto_restart_ran:
-            return
+            return False
         self.startup_auto_restart_ran = True
+        skip_reason = DashboardApp.startup_auto_restart_skip_reason(self)
+        if skip_reason:
+            self.append_log(f"[BOOT] Startup auto restart skipped: {skip_reason}.")
+            return False
         self.request_bot_restart(source="startup")
+        return True
+
+    def runtime_heartbeat_age_seconds(self, runtime_state):
+        heartbeat = str((runtime_state or {}).get("heartbeat_at") or "").strip()
+        if not heartbeat:
+            return None
+        try:
+            heartbeat_at = datetime.fromisoformat(heartbeat)
+        except Exception:
+            return None
+        return max(0.0, (datetime.now() - heartbeat_at).total_seconds())
+
+    def bot_runtime_stale_reason(self, runtime_state):
+        if not runtime_state or not runtime_state.get("pid"):
+            return ""
+        status = str(runtime_state.get("status") or "").strip().lower()
+        if status in {"stale", "error", "disconnected", "closed"}:
+            return status
+        heartbeat_age = DashboardApp.runtime_heartbeat_age_seconds(self, runtime_state)
+        if heartbeat_age is not None and heartbeat_age >= BOT_RUNTIME_HEARTBEAT_STALE_SECONDS:
+            return f"heartbeat stale ({int(heartbeat_age)}s)"
+        return ""
+
+    def maybe_reconnect_stale_bot_runtime(self, runtime_state):
+        reason = DashboardApp.bot_runtime_stale_reason(self, runtime_state)
+        if not reason:
+            if getattr(self, "bot_health_reconnect_attempts", 0):
+                self.bot_health_reconnect_attempts = 0
+                self.bot_health_next_reconnect_at = 0.0
+            return False
+        if getattr(self, "_closing", False):
+            return False
+        if self.restart_in_progress:
+            return False
+        now = time.monotonic()
+        if now < float(getattr(self, "bot_health_next_reconnect_at", 0.0) or 0.0):
+            return False
+        self.bot_health_last_reason = reason
+        return self.request_bot_restart(source="health")
 
     def poll_bot_process(self):
         if self.process is not None:
             return_code = self.process.poll()
             if return_code is None:
+                runtime_state = get_active_bot_runtime_state()
+                self.maybe_reconnect_stale_bot_runtime(runtime_state)
                 return
+            should_reconnect = not getattr(self, "_closing", False) and not self.restart_in_progress
             clear_bot_runtime_state(self.process.pid)
             self.append_log(f"[BOT] Bot process exited with code {return_code}")
             self.process = None
+            self.external_bot_runtime_active = False
             self.set_status(False)
+            self.update_runtime_timer_policy()
+            if should_reconnect:
+                self.request_bot_restart(source="health")
             return
 
-        runtime_state = get_active_bot_runtime_state()
-        if runtime_state.get("pid"):
-            self.set_status(True)
+        if getattr(self, "external_bot_runtime_active", False):
+            runtime_state = get_active_bot_runtime_state()
+            if runtime_state.get("pid"):
+                self.set_status(True)
+                self.maybe_reconnect_stale_bot_runtime(runtime_state)
+            else:
+                self.external_bot_runtime_active = False
+                self.set_status(False)
+                self.update_runtime_timer_policy()
 
     # =========================
     # Manual chat
@@ -2967,7 +3402,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         token_details = load_token_details(BOT_AUTH_ROLE)
         token = token_details.get("access_token")
         if not token:
-            self.append_log(f"Connect Bot Account first. No token found at: {token_details.get('path')}")
+            self.append_log("Connect Bot Account first.")
             return
 
         bot_login = self.settings_bot_login.text().strip() or self.bot_login_entry.text().strip()
@@ -3035,18 +3470,76 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
     # =========================
     # Dashboard data
     # =========================
-    def refresh_dashboard(self):
-        self.dashboard_state = load_dashboard_state()
-        self.users_data = load_json(USERS_FILE, {})
+    def set_label_text_if_changed(self, label, text):
+        value = str(text)
+        if label.text() == value:
+            return False
+        label.setText(value)
+        return True
 
+    def refresh_dashboard_stats(self, *, force=False):
         messages_today = int(self.dashboard_state.get("messages_today", 0) or 0)
         commands_used = int(self.dashboard_state.get("commands_used", 0) or 0)
         timeouts_today = int(self.dashboard_state.get("timeouts_today", 0) or 0)
-        self.messages_today_value.setText(str(messages_today))
-        self.commands_value.setText(str(commands_used))
-        self.timeouts_value.setText(str(timeouts_today))
+        current_hour = time.localtime().tm_hour
+        channel_name = self.current_channel_login() or "your channel"
+        signature = (
+            messages_today,
+            commands_used,
+            timeouts_today,
+            self.dashboard_state.get("last_updated", ""),
+            current_hour,
+            channel_name,
+        )
+        if not force and signature == self.dashboard_ui_signatures.get("stats"):
+            return False
+        self.dashboard_ui_signatures["stats"] = signature
 
+        self.set_label_text_if_changed(self.messages_today_value, messages_today)
+        self.set_label_text_if_changed(self.commands_value, commands_used)
+        self.set_label_text_if_changed(self.timeouts_value, timeouts_today)
+
+        if current_hour < 12:
+            greeting = "Good morning"
+        elif current_hour < 18:
+            greeting = "Good afternoon"
+        else:
+            greeting = "Good evening"
+        if hasattr(self, "dashboard_heading_label"):
+            self.set_localized_text(
+                self.dashboard_heading_label,
+                "dashboard.greeting",
+                greeting=self.localize(greeting),
+                channel=channel_name if channel_name != "your channel" else self.localize("your channel"),
+            )
+        if hasattr(self, "dashboard_subtitle_label"):
+            self.set_localized_text(
+                self.dashboard_subtitle_label,
+                "Here is a cleaner 7-day overview of messages, commands, timeouts, and live activity.",
+            )
+        if hasattr(self, "dashboard_last_updated_label"):
+            last_updated = self.dashboard_state.get("last_updated", "")
+            if last_updated:
+                self.set_localized_text(self.dashboard_last_updated_label, "dashboard.updated", time=last_updated)
+            else:
+                self.set_localized_text(self.dashboard_last_updated_label, "Waiting for your first activity pulse")
+        return True
+
+    def refresh_dashboard_chart(self, *, force=False):
         history = self.dashboard_state.get("analytics_history", [])[-7:]
+        signature = tuple(
+            (
+                str(bucket.get("date", "")),
+                int(bucket.get("messages", 0) or 0),
+                int(bucket.get("commands", 0) or 0),
+                int(bucket.get("timeouts", 0) or 0),
+            )
+            for bucket in history
+        )
+        if not force and signature == self.dashboard_ui_signatures.get("chart"):
+            return False
+        self.dashboard_ui_signatures["chart"] = signature
+
         labels = []
         tooltip_labels = []
         messages_series = []
@@ -3082,50 +3575,44 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
             self.set_localized_text(self.commands_hint_value, "dashboard.seven_day_total", total=sum(commands_series))
         if hasattr(self, "timeouts_hint_value"):
             self.set_localized_text(self.timeouts_hint_value, "dashboard.seven_day_total", total=sum(timeouts_series))
+        return True
 
-        current_hour = time.localtime().tm_hour
-        if current_hour < 12:
-            greeting = "Good morning"
-        elif current_hour < 18:
-            greeting = "Good afternoon"
-        else:
-            greeting = "Good evening"
-        channel_name = self.current_channel_login() or "your channel"
-        if hasattr(self, "dashboard_heading_label"):
-            self.set_localized_text(
-                self.dashboard_heading_label,
-                "dashboard.greeting",
-                greeting=self.localize(greeting),
-                channel=channel_name if channel_name != "your channel" else self.localize("your channel"),
-            )
-        if hasattr(self, "dashboard_subtitle_label"):
-            self.set_localized_text(
-                self.dashboard_subtitle_label,
-                "Here is a cleaner 7-day overview of messages, commands, timeouts, and live activity.",
-            )
-        if hasattr(self, "dashboard_last_updated_label"):
-            last_updated = self.dashboard_state.get("last_updated", "")
-            if last_updated:
-                self.set_localized_text(self.dashboard_last_updated_label, "dashboard.updated", time=last_updated)
-            else:
-                self.set_localized_text(self.dashboard_last_updated_label, "Waiting for your first activity pulse")
-        self.update_dashboard_status_badge()
-        self.update_alerts_status_ui()
-        if hasattr(self, "dashboard_alert_rows_layout"):
-            self.refresh_dashboard_alerts()
+    def refresh_dashboard_top_chatters(self, *, force=False):
         sorted_chatters = sorted(
             self.dashboard_state.get("top_chatters", {}).items(),
             key=lambda item: item[1],
             reverse=True,
         )[:5]
+        signature = tuple((str(name), int(count or 0)) for name, count in sorted_chatters)
+        if not force and signature == self.dashboard_ui_signatures.get("top_chatters"):
+            return False
+        self.dashboard_ui_signatures["top_chatters"] = signature
         self.populate_dashboard_table(
             self.top_chatters_table,
             sorted_chatters,
             empty_left="No chatters yet",
             empty_right="0",
         )
+        return True
 
+    def refresh_dashboard_chat_preview(self, *, force=False):
         entries = self.dashboard_state.get("recent_chat", [])[-50:]
+        signature = (
+            self.current_channel_login().strip().lower(),
+            tuple(
+                (
+                    str(entry.get("username", "")),
+                    str(entry.get("text", "")),
+                    str(entry.get("timestamp", "")),
+                    str(entry.get("platform", "")),
+                )
+                for entry in entries
+            ),
+        )
+        if not force and signature == self.dashboard_ui_signatures.get("chat_preview"):
+            return False
+        self.dashboard_ui_signatures["chat_preview"] = signature
+
         html_text = self.chat_renderer.build_chat_html(
             entries,
             self.current_channel_login(),
@@ -3134,12 +3621,71 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.sync_scroll_html(self.chat_live, html_text)
         self.sync_scroll_html(self.chat_page_text, html_text)
         self.request_chat_asset_warmup(entries)
+        return True
 
-        if getattr(self, "current_page_name", "Dashboard") == "Viewers":
+    def refresh_dashboard_alert_card(self, *, force=False):
+        if not hasattr(self, "dashboard_alert_rows_layout"):
+            return False
+        self.load_alert_feed_items(force=force)
+        alerts = self.get_latest_alert_feed_items(3)
+        signature = tuple(str(item.get("id") or self.alert_render_log_key(item)) for item in alerts)
+        if not force and signature == self.dashboard_ui_signatures.get("alerts_card"):
+            return False
+        self.dashboard_ui_signatures["alerts_card"] = signature
+        self.refresh_dashboard_alerts()
+        return True
+
+    def refresh_active_page_if_needed(self, changes, *, force=False):
+        page_name = getattr(self, "current_page_name", "Dashboard")
+        if page_name == "Viewers" and (force or changes.get("dashboard") or changes.get("users")):
             self.refresh_viewers_dashboard()
-        elif getattr(self, "current_page_name", "Dashboard") == "Alerts":
-            self.request_viewer_relationships_sync(force=False)
-            self.refresh_alert_feed()
+        elif page_name == "Alerts":
+            alerts_changed = bool(changes.get("alerts"))
+            status_changed = bool(changes.get("alert_status"))
+            if force or alerts_changed or status_changed:
+                self.request_viewer_relationships_sync(force=False)
+                self.refresh_alert_feed()
+
+    def refresh_dashboard(self, *, force=False):
+        changes = self.refresh_cached_runtime_state(force=force)
+        dashboard_changed = bool(changes.get("dashboard"))
+        users_changed = bool(changes.get("users"))
+        alert_status_changed, _ = self.cached_file_changed("alert_status", ALERT_STATUS_FILE, force=force)
+        alerts_changed, _ = self.cached_file_changed("alerts", ALERTS_FILE, force=force)
+        if alert_status_changed:
+            self.alert_status_cache = load_alert_status(ALERT_STATUS_FILE)
+            self.alert_status_signature = self.file_signature_cache.get("alert_status")
+        if alerts_changed:
+            self.alert_feed_loaded = False
+
+        self.refresh_dashboard_stats(force=force or dashboard_changed)
+        if force or dashboard_changed:
+            self.refresh_dashboard_chart(force=force)
+            self.refresh_dashboard_top_chatters(force=force)
+            self.refresh_dashboard_chat_preview(force=force)
+
+        if force or alerts_changed:
+            self.refresh_dashboard_alert_card(force=force or alerts_changed)
+
+        status_signature = (
+            self.process.pid if self.process is not None and self.process.poll() is None else 0,
+            self.alerts_process.pid if self.alerts_process is not None and self.alerts_process.poll() is None else 0,
+            alert_status_changed,
+        )
+        if force or status_signature != self.dashboard_ui_signatures.get("status"):
+            self.dashboard_ui_signatures["status"] = status_signature
+            self.update_dashboard_status_badge()
+            self.update_alerts_status_ui()
+
+        self.refresh_active_page_if_needed(
+            {
+                "dashboard": dashboard_changed,
+                "users": users_changed,
+                "alerts": alerts_changed,
+                "alert_status": alert_status_changed,
+            },
+            force=force,
+        )
 
     # =========================
     # Page builders
@@ -3220,6 +3766,7 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         else:
             for item in alerts:
                 self.dashboard_alert_rows_layout.addWidget(self.build_alert_feed_row(item))
+            self.log_rendered_alert_events(alerts, source="cached")
         self.dashboard_alert_rows_layout.addStretch()
 
     def build_dashboard_alerts_card(self):
@@ -3694,8 +4241,11 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.current_page_name = name
         for key, button in self.nav_buttons.items():
             button.setChecked(key == name)
+        self.update_runtime_timer_policy()
         if name == "Viewers":
             self.refresh_viewers_dashboard()
+        elif name == "Alerts":
+            self.refresh_alert_feed()
         elif name == "Twitch":
             self.refresh_account_widget(force=self.is_bot_process_running())
 
@@ -3765,50 +4315,50 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
         self.reset_music_session_state()
         self.append_log("[APP] App started")
         self.append_log("[APP] Idle startup complete. Alerts start automatically when Channel Account is connected.")
-        self.append_log(f"[APP] Music command bridge ready: {MUSIC_COMMAND_FILE}")
+        self.append_log("[APP] Music command bridge ready")
         existing_runtime = get_active_bot_runtime_state()
+        self.external_bot_runtime_active = bool(existing_runtime.get("pid"))
         if existing_runtime.get("pid"):
             self.append_log(
                 f"[BOT] Existing bot process detected (PID {existing_runtime.get('pid')}). Use Stop Bot before starting another one."
             )
             self.set_status(True)
         existing_alert_runtime = get_active_alert_runtime_state()
+        self.external_alert_runtime_active = bool(existing_alert_runtime.get("pid"))
         if existing_alert_runtime.get("pid"):
             self.append_log(f"[ALERTS] Existing alerts listener detected (PID {existing_alert_runtime.get('pid')})")
-        self.ensure_alerts_listener()
-        self.schedule_startup_auto_restart()
-        self.refresh_dashboard()
-        self.refresh_token_status()
-        self.refresh_account_widget()
-        self.request_auth_health_check(force=True)
-        QTimer.singleShot(1200, self.show_pending_crash_dialog)
+        QTimer.singleShot(100, self.refresh_dashboard)
+        QTimer.singleShot(250, self.refresh_token_status)
+        QTimer.singleShot(450, self.refresh_account_widget)
+        QTimer.singleShot(650, lambda: self.request_auth_health_check(force=True))
+        QTimer.singleShot(1500, self.show_pending_crash_dialog)
         if self.update_config.auto_update_enabled:
-            QTimer.singleShot(3500, lambda: self.check_for_updates(auto=True))
+            QTimer.singleShot(4200, lambda: self.check_for_updates(auto=True))
 
     def start_timers(self):
         self.timer_dashboard = QTimer(self)
         self.timer_dashboard.timeout.connect(self.refresh_dashboard)
-        self.timer_dashboard.start(2000)
+        self.timer_dashboard.start(5000)
 
         self.timer_music = QTimer(self)
         self.timer_music.timeout.connect(self.process_music_command)
-        self.timer_music.start(1000)
+        self.timer_music.setInterval(1500)
 
         self.timer_player = QTimer(self)
         self.timer_player.timeout.connect(self.monitor_music_state)
-        self.timer_player.start(1500)
+        self.timer_player.setInterval(1500)
 
         self.timer_audio = QTimer(self)
         self.timer_audio.timeout.connect(self.poll_audio_state)
-        self.timer_audio.start(1000)
+        self.timer_audio.setInterval(1500)
 
         self.timer_process = QTimer(self)
         self.timer_process.timeout.connect(self.poll_bot_process)
-        self.timer_process.start(1000)
+        self.timer_process.setInterval(2000)
 
         self.timer_alerts = QTimer(self)
         self.timer_alerts.timeout.connect(self.poll_alerts_process)
-        self.timer_alerts.start(2500)
+        self.timer_alerts.setInterval(5000)
 
         self.timer_live_log_retention = QTimer(self)
         self.timer_live_log_retention.timeout.connect(self.flush_pending_log_lines)
@@ -3816,4 +4366,72 @@ class DashboardApp(DashboardViewersMixin, DashboardMusicMixin, DashboardTwitchMi
 
         self.timer_auth_health = QTimer(self)
         self.timer_auth_health.timeout.connect(self.request_auth_health_check)
-        self.timer_auth_health.start(45000)
+        self.timer_auth_health.start(60000)
+        self.update_runtime_timer_policy()
+
+    def set_timer_policy_state(self, timer, *, active, interval=None):
+        if timer is None:
+            return
+        if interval is not None and timer.interval() != int(interval):
+            timer.setInterval(int(interval))
+        if active:
+            if not timer.isActive():
+                timer.start()
+        elif timer.isActive():
+            timer.stop()
+
+    def music_runtime_active(self):
+        player = getattr(self, "music_player", None)
+        player_playing = False
+        if player is not None:
+            try:
+                player_playing = bool(player.is_playing())
+            except Exception:
+                player_playing = False
+        return bool(
+            getattr(self, "music_loading", False)
+            or getattr(self, "current_track_active", False)
+            or player_playing
+        )
+
+    def update_runtime_timer_policy(self):
+        page_name = getattr(self, "current_page_name", "Dashboard")
+        self.set_timer_policy_state(
+            getattr(self, "timer_dashboard", None),
+            active=True,
+            interval=5000 if page_name == "Dashboard" else 10000,
+        )
+
+        bot_process_active = bool(self.process is not None and self.process.poll() is None)
+        alerts_process_active = bool(self.alerts_process is not None and self.alerts_process.poll() is None)
+        bot_runtime_active = bool(bot_process_active or getattr(self, "external_bot_runtime_active", False))
+        alerts_runtime_active = bool(alerts_process_active or getattr(self, "external_alert_runtime_active", False))
+        music_active = self.music_runtime_active()
+        channel_health = getattr(self, "auth_health_state", {}).get(CHANNEL_AUTH_ROLE, {})
+        channel_connected = channel_health.get("state") == "connected"
+
+        self.set_timer_policy_state(
+            getattr(self, "timer_music", None),
+            active=bool(bot_runtime_active or music_active or page_name == "Music"),
+            interval=1500 if bot_runtime_active else 4000,
+        )
+        self.set_timer_policy_state(
+            getattr(self, "timer_player", None),
+            active=music_active,
+            interval=1500,
+        )
+        self.set_timer_policy_state(
+            getattr(self, "timer_audio", None),
+            active=bool(music_active or getattr(self, "audio_session_attached", False)),
+            interval=1500,
+        )
+        self.set_timer_policy_state(
+            getattr(self, "timer_process", None),
+            active=bot_runtime_active,
+            interval=2000,
+        )
+        self.set_timer_policy_state(
+            getattr(self, "timer_alerts", None),
+            active=bool(alerts_runtime_active or channel_connected),
+            interval=5000,
+        )

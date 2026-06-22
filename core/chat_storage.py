@@ -1,10 +1,17 @@
+import errno
+import os
 import re
+import threading
+import time
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from .app_paths import CHAT_LOG_FILE, DASHBOARD_STATE_FILE, USERS_FILE
 from .app_state import DASHBOARD_HISTORY_DAYS, default_dashboard_state, load_json, save_json
+from .runtime_logging import write_diagnostics_line
 
 
 CHAT_USER_LINE_RE = re.compile(
@@ -46,14 +53,252 @@ STOP_WORDS = {
 
 _CHAT_ANALYTICS_CACHE_SIGNATURE = None
 _CHAT_ANALYTICS_CACHE_PAYLOAD = None
+_CHAT_LINES_CACHE_SIGNATURE = None
+_CHAT_LINES_CACHE_PAYLOAD = None
+_CHAT_LOG_APPEND_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2)
+_CHAT_LOG_LOCK_TIMEOUT_SECONDS = 2.0
+_CHAT_LOG_STALE_LOCK_SECONDS = 30.0
+_CHAT_LOG_DIAGNOSTIC_RATE_LIMIT_SECONDS = 30.0
+_CHAT_LOG_LOCKS_GUARD = threading.Lock()
+_CHAT_LOG_PATH_LOCKS = {}
+_CHAT_LOG_DIAGNOSTIC_GUARD = threading.Lock()
+_CHAT_LOG_LAST_DIAGNOSTIC_AT = {}
 
 
 def load_user_profiles():
     return load_json(USERS_FILE, {})
 
 
-def save_user_profiles(user_profiles):
-    save_json(USERS_FILE, user_profiles)
+def _chat_log_path_key(path):
+    try:
+        resolved = Path(path).expanduser().resolve(strict=False)
+    except Exception:
+        resolved = Path(path).expanduser().absolute()
+    key = str(resolved)
+    return key.lower() if os.name == "nt" else key
+
+
+def _chat_log_thread_lock(path):
+    key = _chat_log_path_key(path)
+    with _CHAT_LOG_LOCKS_GUARD:
+        lock = _CHAT_LOG_PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _CHAT_LOG_PATH_LOCKS[key] = lock
+        return lock
+
+
+def _chat_log_diagnostic(message, *, key=None, force=False):
+    event_key = key or message
+    now = time.monotonic()
+    with _CHAT_LOG_DIAGNOSTIC_GUARD:
+        last_at = float(_CHAT_LOG_LAST_DIAGNOSTIC_AT.get(event_key, 0.0) or 0.0)
+        if not force and now - last_at < _CHAT_LOG_DIAGNOSTIC_RATE_LIMIT_SECONDS:
+            return
+        _CHAT_LOG_LAST_DIAGNOSTIC_AT[event_key] = now
+    write_diagnostics_line(f"[CHAT_LOG] {message}")
+
+
+def _is_transient_chat_log_error(exc):
+    if isinstance(exc, PermissionError):
+        return True
+    winerror = getattr(exc, "winerror", None)
+    if winerror == 5:
+        return True
+    return getattr(exc, "errno", None) in {errno.EACCES, errno.EPERM}
+
+
+def _cleanup_stale_chat_log_lock(lock_path):
+    try:
+        age = time.time() - Path(lock_path).stat().st_mtime
+    except OSError:
+        return False
+    if age < _CHAT_LOG_STALE_LOCK_SECONDS:
+        return False
+    try:
+        Path(lock_path).unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+@contextmanager
+def _chat_log_process_lock(path, timeout=_CHAT_LOG_LOCK_TIMEOUT_SECONDS):
+    target = Path(path)
+    lock_path = target.with_name(f".{target.name}.lock")
+    deadline = time.monotonic() + float(timeout or _CHAT_LOG_LOCK_TIMEOUT_SECONDS)
+    fd = None
+    delayed = False
+
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()} {time.time():.6f}\n".encode("ascii", errors="ignore"))
+            break
+        except FileExistsError:
+            if _cleanup_stale_chat_log_lock(lock_path):
+                _chat_log_diagnostic("removed stale writer lock", key="stale-lock")
+                continue
+            if time.monotonic() >= deadline:
+                _chat_log_diagnostic("failed waiting for writer lock", key="lock-timeout", force=True)
+                raise PermissionError("Timed out waiting for chat log writer lock")
+            if not delayed:
+                delayed = True
+                _chat_log_diagnostic("delayed by file lock", key="lock-delayed")
+            time.sleep(0.05)
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                _chat_log_diagnostic("failed opening writer lock", key="lock-permission", force=True)
+                raise
+            if not delayed:
+                delayed = True
+                _chat_log_diagnostic("delayed by lock permission", key="lock-permission-delayed")
+            time.sleep(0.05)
+
+    try:
+        yield
+    finally:
+        try:
+            if fd is not None:
+                os.close(fd)
+        finally:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _reset_chat_log_line_cache():
+    global _CHAT_LINES_CACHE_SIGNATURE, _CHAT_LINES_CACHE_PAYLOAD
+    _CHAT_LINES_CACHE_SIGNATURE = None
+    _CHAT_LINES_CACHE_PAYLOAD = None
+
+
+def _append_chat_log_lines(lines, *, retry_delays=_CHAT_LOG_APPEND_RETRY_DELAYS):
+    CHAT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    thread_lock = _chat_log_thread_lock(CHAT_LOG_FILE)
+    attempts = [0.0] + list(retry_delays if retry_delays is not None else _CHAT_LOG_APPEND_RETRY_DELAYS)
+    last_exc = None
+
+    with thread_lock:
+        with _chat_log_process_lock(CHAT_LOG_FILE):
+            for index, delay in enumerate(attempts):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    with CHAT_LOG_FILE.open("a", encoding="utf-8", newline="\n") as handle:
+                        for line in lines:
+                            handle.write(line)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    _reset_chat_log_line_cache()
+                    if index:
+                        _chat_log_diagnostic("append succeeded after retry", key="append-retry-success", force=True)
+                    return True
+                except OSError as exc:
+                    last_exc = exc
+                    if not _is_transient_chat_log_error(exc) or index >= len(attempts) - 1:
+                        break
+                    _chat_log_diagnostic("append retried after file lock", key="append-retry")
+
+    _chat_log_diagnostic("append failed after retries", key="append-failed", force=True)
+    if last_exc is not None:
+        raise last_exc
+    return False
+
+
+LOCAL_VIEWER_PROFILE_FIELDS = {"muted", "manual_role"}
+VOLATILE_VIEWER_PROFILE_FIELDS = {"last_seen", "last_message", "behavior", "notes"}
+
+
+def _profile_message_count(profile):
+    try:
+        return int((profile or {}).get("messages", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _profile_timestamp(profile):
+    return _parse_chat_timestamp((profile or {}).get("last_seen", ""))
+
+
+def merge_user_profile_for_save(existing_profile, incoming_profile, *, prefer_incoming_local_fields=False):
+    existing = dict(existing_profile or {})
+    incoming = dict(incoming_profile or {})
+    if not existing:
+        return incoming
+    if not incoming:
+        return existing
+
+    merged = dict(existing)
+    merged.update(incoming)
+    merged["messages"] = max(_profile_message_count(existing), _profile_message_count(incoming))
+
+    existing_seen = _profile_timestamp(existing)
+    incoming_seen = _profile_timestamp(incoming)
+    if existing_seen and (not incoming_seen or existing_seen > incoming_seen):
+        for field in VOLATILE_VIEWER_PROFILE_FIELDS:
+            if field in existing:
+                merged[field] = existing[field]
+
+    if not prefer_incoming_local_fields:
+        for field in LOCAL_VIEWER_PROFILE_FIELDS:
+            if field in existing:
+                merged[field] = existing[field]
+            elif field in incoming:
+                merged[field] = incoming[field]
+
+    return merged
+
+
+def merge_user_profiles_for_save(user_profiles, existing_profiles=None, *, prefer_incoming_local_fields=False):
+    incoming_profiles = user_profiles if isinstance(user_profiles, dict) else {}
+    existing_profiles = existing_profiles if isinstance(existing_profiles, dict) else {}
+    merged_profiles = {}
+    for username in sorted(set(existing_profiles) | set(incoming_profiles), key=lambda value: str(value).lower()):
+        if username in incoming_profiles and username in existing_profiles:
+            merged_profiles[username] = merge_user_profile_for_save(
+                existing_profiles.get(username),
+                incoming_profiles.get(username),
+                prefer_incoming_local_fields=prefer_incoming_local_fields,
+            )
+        elif username in incoming_profiles:
+            merged_profiles[username] = deepcopy(incoming_profiles.get(username) or {})
+        else:
+            merged_profiles[username] = deepcopy(existing_profiles.get(username) or {})
+    return merged_profiles
+
+
+def save_user_profiles(user_profiles, *, prefer_incoming_local_fields=False):
+    existing_profiles = load_user_profiles()
+    merged_profiles = merge_user_profiles_for_save(
+        user_profiles,
+        existing_profiles,
+        prefer_incoming_local_fields=prefer_incoming_local_fields,
+    )
+    return save_json(USERS_FILE, merged_profiles)
+
+
+def save_user_profile_changes(username, changes, *, current_profiles=None):
+    username = str(username or "").strip()
+    if not username:
+        return False, {}
+    latest_profiles = load_user_profiles()
+    current_profile = {}
+    if isinstance(current_profiles, dict):
+        current_profile = dict(current_profiles.get(username, {}) or {})
+    base_profile = merge_user_profile_for_save(latest_profiles.get(username, {}), current_profile)
+    updated_profile = dict(base_profile)
+    updated_profile.update(changes or {})
+    payload = dict(latest_profiles)
+    payload[username] = updated_profile
+    changed = save_user_profiles(payload, prefer_incoming_local_fields=True)
+    saved_profile = merge_user_profiles_for_save(
+        payload,
+        load_user_profiles(),
+        prefer_incoming_local_fields=True,
+    ).get(username, updated_profile)
+    return changed, saved_profile
 
 
 def ensure_dashboard_shape(dashboard_state, days=DASHBOARD_HISTORY_DAYS):
@@ -266,16 +511,25 @@ def append_recent_chat(
 
 def log_chat(username, message, reply="", platform="twitch"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with CHAT_LOG_FILE.open("a", encoding="utf-8") as handle:
-        handle.write(f"[{timestamp}] PLATFORM={platform} USER={username} MESSAGE={message}\n")
-        if reply:
-            handle.write(f"[{timestamp}] PLATFORM={platform} BOT={reply}\n")
+    lines = [f"[{timestamp}] PLATFORM={platform} USER={username} MESSAGE={message}\n"]
+    if reply:
+        lines.append(f"[{timestamp}] PLATFORM={platform} BOT={reply}\n")
+    _append_chat_log_lines(lines)
 
 
 def read_chat_log_lines():
+    global _CHAT_LINES_CACHE_SIGNATURE, _CHAT_LINES_CACHE_PAYLOAD
+    signature = _chat_log_signature()
+    if signature == _CHAT_LINES_CACHE_SIGNATURE and _CHAT_LINES_CACHE_PAYLOAD is not None:
+        return list(_CHAT_LINES_CACHE_PAYLOAD)
     if not CHAT_LOG_FILE.exists():
+        _CHAT_LINES_CACHE_SIGNATURE = signature
+        _CHAT_LINES_CACHE_PAYLOAD = []
         return []
-    return CHAT_LOG_FILE.read_text(encoding="utf-8").splitlines()
+    lines = CHAT_LOG_FILE.read_text(encoding="utf-8").splitlines()
+    _CHAT_LINES_CACHE_SIGNATURE = signature
+    _CHAT_LINES_CACHE_PAYLOAD = list(lines)
+    return lines
 
 
 def _parse_chat_timestamp(value):

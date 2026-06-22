@@ -21,6 +21,8 @@ INSTALLATIONS_TABLE = "installations"
 DEFAULT_TIMEOUT_SECONDS = 8
 INSTALL_ID_PATTERN = re.compile(r"^[a-f0-9-]{32,36}$", re.IGNORECASE)
 MAX_LOG_BODY_LENGTH = 4000
+DEFAULT_TELEMETRY_LOG_MAX_BYTES = 1024 * 1024
+DEFAULT_TELEMETRY_LOG_ROTATE_COUNT = 3
 
 
 @dataclass
@@ -35,9 +37,32 @@ def utc_timestamp():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def append_telemetry_log(message, *, log_file=TELEMETRY_LOG_FILE):
+def rotate_telemetry_log_if_needed(
+    log_file=TELEMETRY_LOG_FILE,
+    *,
+    max_bytes=DEFAULT_TELEMETRY_LOG_MAX_BYTES,
+    rotate_count=DEFAULT_TELEMETRY_LOG_ROTATE_COUNT,
+):
+    try:
+        if not log_file.exists() or log_file.stat().st_size < int(max_bytes or 0):
+            return
+        for index in range(int(rotate_count or 1) - 1, 0, -1):
+            source = log_file.with_name(f"{log_file.name}.{index}")
+            target = log_file.with_name(f"{log_file.name}.{index + 1}")
+            if source.exists():
+                if index + 1 > int(rotate_count or 1):
+                    source.unlink(missing_ok=True)
+                else:
+                    source.replace(target)
+        log_file.replace(log_file.with_name(f"{log_file.name}.1"))
+    except Exception:
+        pass
+
+
+def append_telemetry_log(message, *, log_file=TELEMETRY_LOG_FILE, max_bytes=DEFAULT_TELEMETRY_LOG_MAX_BYTES):
     try:
         log_file.parent.mkdir(parents=True, exist_ok=True)
+        rotate_telemetry_log_if_needed(log_file, max_bytes=max_bytes)
         timestamp = utc_timestamp()
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(f"{timestamp} {message}\n")
@@ -54,6 +79,25 @@ def truncate_log_value(value, max_length=MAX_LOG_BODY_LENGTH):
 
 def mask_loaded_key(value):
     return "yes (masked)" if str(value or "").strip() else "no"
+
+
+def mask_install_id(value):
+    text = str(value or "").strip()
+    if len(text) <= 8:
+        return "<masked>"
+    return f"<masked>...{text[-6:]}"
+
+
+def telemetry_error_category(exc):
+    if isinstance(exc, requests.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.ConnectionError):
+        return "network"
+    if isinstance(exc, requests.HTTPError):
+        return "http"
+    if isinstance(exc, requests.RequestException):
+        return "request"
+    return "exception"
 
 
 def clean_telemetry_text(value: Any, max_length=255):
@@ -111,6 +155,8 @@ class SupabaseTelemetryService:
         log_file=TELEMETRY_LOG_FILE,
         timeout=DEFAULT_TIMEOUT_SECONDS,
         request_func=None,
+        developer_diagnostics=False,
+        log_max_bytes=DEFAULT_TELEMETRY_LOG_MAX_BYTES,
     ):
         self.supabase_url = str(supabase_url or "").rstrip("/")
         self.publishable_key = str(publishable_key or "")
@@ -119,6 +165,13 @@ class SupabaseTelemetryService:
         self.log_file = log_file
         self.timeout = timeout
         self.request_func = request_func or requests.request
+        self.developer_diagnostics = bool(developer_diagnostics)
+        self.log_max_bytes = int(log_max_bytes or DEFAULT_TELEMETRY_LOG_MAX_BYTES)
+
+    def telemetry_log(self, message, *, detailed=False):
+        if detailed and not self.developer_diagnostics:
+            return
+        append_telemetry_log(message, log_file=self.log_file, max_bytes=self.log_max_bytes)
 
     @property
     def table_url(self):
@@ -135,8 +188,9 @@ class SupabaseTelemetryService:
 
     def update_existing(self, install_id, payload):
         url = f"{self.table_url}?install_id=eq.{quote(str(install_id), safe='')}"
-        append_telemetry_log(f"Update request URL: {url}", log_file=self.log_file)
-        append_telemetry_log(f"Update request payload: {payload}", log_file=self.log_file)
+        self.telemetry_log("Update request prepared", detailed=True)
+        self.telemetry_log(f"Update request URL present: {'yes' if url else 'no'}", detailed=True)
+        self.telemetry_log(f"Update request payload fields: {sorted(payload.keys())}", detailed=True)
         response = self.request_func(
             "PATCH",
             url,
@@ -144,16 +198,16 @@ class SupabaseTelemetryService:
             json=payload,
             timeout=self.timeout,
         )
-        append_telemetry_log(f"Update HTTP status code: {getattr(response, 'status_code', 'unknown')}", log_file=self.log_file)
-        append_telemetry_log(f"Update response body: {truncate_log_value(getattr(response, 'text', ''))}", log_file=self.log_file)
+        self.telemetry_log(f"Update HTTP status code: {getattr(response, 'status_code', 'unknown')}", detailed=True)
+        self.telemetry_log(f"Update response body: {truncate_log_value(getattr(response, 'text', ''))}", detailed=True)
         response.raise_for_status()
-        return True
+        return getattr(response, "status_code", None)
 
     def insert_or_ignore(self, payload):
         url = f"{self.table_url}?on_conflict=install_id"
-        append_telemetry_log("Insert/update attempt: insert or ignore, then update by install_id", log_file=self.log_file)
-        append_telemetry_log(f"Insert request URL: {url}", log_file=self.log_file)
-        append_telemetry_log(f"Insert request payload: {payload}", log_file=self.log_file)
+        self.telemetry_log("Insert/update attempt prepared", detailed=True)
+        self.telemetry_log(f"Insert request URL present: {'yes' if url else 'no'}", detailed=True)
+        self.telemetry_log(f"Insert request payload fields: {sorted(payload.keys())}", detailed=True)
         response = self.request_func(
             "POST",
             url,
@@ -161,52 +215,54 @@ class SupabaseTelemetryService:
             json=payload,
             timeout=self.timeout,
         )
-        append_telemetry_log(f"Insert HTTP status code: {getattr(response, 'status_code', 'unknown')}", log_file=self.log_file)
-        append_telemetry_log(f"Insert response body: {truncate_log_value(getattr(response, 'text', ''))}", log_file=self.log_file)
+        self.telemetry_log(f"Insert HTTP status code: {getattr(response, 'status_code', 'unknown')}", detailed=True)
+        self.telemetry_log(f"Insert response body: {truncate_log_value(getattr(response, 'text', ''))}", detailed=True)
         response.raise_for_status()
-        return True
+        return getattr(response, "status_code", None)
 
     def upsert_installation(self, install_id, insert_payload, update_payload):
-        self.insert_or_ignore(insert_payload)
-        self.update_existing(install_id, update_payload)
-        return True
+        insert_status = self.insert_or_ignore(insert_payload)
+        update_status = self.update_existing(install_id, update_payload)
+        return insert_status, update_status
 
     def sync_installation(self, settings=None):
+        install_id = ""
         try:
-            append_telemetry_log("Telemetry startup", log_file=self.log_file)
-            append_telemetry_log(f"Supabase URL present: {'yes' if self.supabase_url else 'no'}", log_file=self.log_file)
-            append_telemetry_log(f"Supabase URL loaded: {self.supabase_url}", log_file=self.log_file)
-            append_telemetry_log(f"Supabase key present: {'yes' if self.publishable_key else 'no'}", log_file=self.log_file)
-            append_telemetry_log(f"Supabase key loaded: {mask_loaded_key(self.publishable_key)}", log_file=self.log_file)
+            safe_settings = settings if isinstance(settings, dict) else {}
+            self.developer_diagnostics = bool(
+                self.developer_diagnostics
+                or safe_settings.get("developer_diagnostics")
+                or safe_settings.get("telemetry_diagnostics")
+            )
+            self.telemetry_log("Telemetry sync requested")
+            self.telemetry_log(f"Supabase URL present: {'yes' if self.supabase_url else 'no'}", detailed=True)
+            self.telemetry_log(f"Supabase key present: {'yes' if self.publishable_key else 'no'}", detailed=True)
+            self.telemetry_log(f"Supabase key loaded: {mask_loaded_key(self.publishable_key)}", detailed=True)
             install_id, created = load_or_create_install_id_with_status(self.storage_file)
             state_text = "generated" if created else "loaded"
-            append_telemetry_log(f"install_id {state_text}: {install_id}", log_file=self.log_file)
-            update_payload = build_installation_payload(settings or {}, install_id, include_first_seen=False)
-            insert_payload = build_installation_payload(settings or {}, install_id, include_first_seen=True)
-            append_telemetry_log(f"channel_name: {update_payload.get('channel_name', '')}", log_file=self.log_file)
-            append_telemetry_log(f"bot_name: {update_payload.get('bot_name', '')}", log_file=self.log_file)
-            append_telemetry_log(f"app_version: {update_payload.get('app_version', '')}", log_file=self.log_file)
-            append_telemetry_log(f"os_version: {update_payload.get('os_version', '')}", log_file=self.log_file)
-            append_telemetry_log(f"Update request payload prepared: {update_payload}", log_file=self.log_file)
-            append_telemetry_log(f"Insert request payload prepared: {insert_payload}", log_file=self.log_file)
-            self.upsert_installation(install_id, insert_payload, update_payload)
-            append_telemetry_log("Telemetry sync result: upserted", log_file=self.log_file)
+            self.telemetry_log(f"install_id {state_text}: {mask_install_id(install_id)}", detailed=True)
+            update_payload = build_installation_payload(safe_settings, install_id, include_first_seen=False)
+            insert_payload = build_installation_payload(safe_settings, install_id, include_first_seen=True)
+            self.telemetry_log(f"app_version: {update_payload.get('app_version', '')}", detailed=True)
+            self.telemetry_log("Telemetry payload prepared with allowed fields only", detailed=True)
+            insert_status, update_status = self.upsert_installation(install_id, insert_payload, update_payload)
+            self.telemetry_log(f"Telemetry sync succeeded: upserted (insert={insert_status}, update={update_status})")
             return TelemetryResult(True, "upserted", install_id)
         except requests.HTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             response_body = getattr(getattr(exc, "response", None), "text", "")
-            append_telemetry_log(f"Telemetry HTTP exception status: {status}", log_file=self.log_file)
-            append_telemetry_log(f"Telemetry HTTP exception response body: {truncate_log_value(response_body)}", log_file=self.log_file)
-            append_telemetry_log(f"Telemetry exception stack trace:\n{traceback.format_exc()}", log_file=self.log_file)
+            self.telemetry_log(f"Telemetry sync failed: category=http status={status}")
+            self.telemetry_log(f"Telemetry HTTP response body: {truncate_log_value(response_body)}", detailed=True)
+            self.telemetry_log(f"Telemetry exception stack trace:\n{traceback.format_exc()}", detailed=True)
             return TelemetryResult(False, "failed", install_id, str(exc))
         except Exception as exc:
-            install_id = ""
             try:
                 install_id = load_or_create_install_id(self.storage_file)
             except Exception:
                 pass
-            append_telemetry_log(f"Telemetry exception: {exc}", log_file=self.log_file)
-            append_telemetry_log(f"Telemetry exception stack trace:\n{traceback.format_exc()}", log_file=self.log_file)
+            self.telemetry_log(f"Telemetry sync skipped: category={telemetry_error_category(exc)}")
+            self.telemetry_log(f"Telemetry exception: {exc}", detailed=True)
+            self.telemetry_log(f"Telemetry exception stack trace:\n{traceback.format_exc()}", detailed=True)
             return TelemetryResult(False, "failed", install_id, str(exc))
 
 
@@ -216,7 +272,6 @@ def sync_installation(settings=None, **kwargs):
 
 def sync_installation_async(settings=None, on_result=None, **kwargs):
     settings_snapshot = dict(settings or {})
-    append_telemetry_log("Telemetry startup requested")
 
     def worker():
         result = sync_installation(settings_snapshot, **kwargs)

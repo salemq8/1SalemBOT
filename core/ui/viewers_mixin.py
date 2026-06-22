@@ -8,10 +8,10 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QAbstractItemView, QComboBox, QGridLayout, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableView, QVBoxLayout, QWidget
 
 from core.alert_storage import add_alert_items, build_new_follower_alerts, build_new_subscription_alerts
-from core.app_paths import ALERTS_FILE, SETTINGS_FILE, VIEWER_RELATIONSHIPS_FILE
+from core.app_paths import ALERTS_FILE, DASHBOARD_STATE_FILE, SETTINGS_FILE, USERS_FILE, VIEWER_RELATIONSHIPS_FILE
 from core.app_state import default_viewer_relationships_state, load_json, save_json
 from core.auth import CHANNEL_AUTH_ROLE, CLIENT_ID, load_best_token, load_token_details
-from core.chat_storage import get_recent_user_only_messages, save_user_profiles
+from core.chat_storage import get_recent_user_only_messages, save_user_profile_changes
 from core.twitch_api import (
     get_all_broadcaster_subscriptions,
     get_all_channel_followers,
@@ -24,6 +24,9 @@ from .widgets import AnalyticsChartWidget, Card, IncrementalTableModel
 
 
 class DashboardViewersMixin:
+    def normalize_viewer_username(self, username):
+        return str(username or "").strip().lower()
+
     def make_viewer_filter_button(self, name):
         button = QPushButton(self.localize(name))
         self._set_i18n_source(button, name)
@@ -130,7 +133,10 @@ class DashboardViewersMixin:
             "moderator": ("Mod", 4),
             "mod": ("Mod", 4),
             "vip": ("VIP", 3),
-            "bot": ("Bot", 2),
+            "product-tester": ("Product Tester", 2),
+            "product tester": ("Product Tester", 2),
+            "producttester": ("Product Tester", 2),
+            "bot": ("Bot", 1.5),
             "subscriber": ("Subscriber", 1),
             "founder": ("Subscriber", 1),
         }
@@ -143,6 +149,8 @@ class DashboardViewersMixin:
             searchable_badge = self.badge_role_key(badge)
             if "lead" in searchable_badge and ("moderator" in searchable_badge or "mod" in searchable_badge):
                 candidate = ("Lead Moderator", 5)
+            elif "product" in searchable_badge and "tester" in searchable_badge:
+                candidate = ("Product Tester", 2)
             else:
                 candidate = role_priority.get(badge_key)
             if candidate and candidate[1] > best_role[1]:
@@ -154,6 +162,7 @@ class DashboardViewersMixin:
             "Viewer": 0,
             "Subscriber": 1,
             "Bot": 2,
+            "Product Tester": 2.5,
             "VIP": 3,
             "Mod": 4,
             "Moderator": 4,
@@ -165,10 +174,10 @@ class DashboardViewersMixin:
         for username, profile in self.users_data.items():
             manual_role = (profile.get("manual_role") or "").strip()
             if manual_role:
-                role_lookup[username] = manual_role
+                role_lookup[self.normalize_viewer_username(username)] = manual_role
 
         for entry in self.dashboard_state.get("recent_chat", []):
-            username = (entry.get("user") or "").strip()
+            username = self.normalize_viewer_username(entry.get("user"))
             if not username:
                 continue
             detected_role = self.derive_badge_role(entry.get("badges", []))
@@ -211,10 +220,11 @@ class DashboardViewersMixin:
             "Moderator": 2,
             "Mod": 2,
             "VIP": 3,
-            "Bot": 4,
-            "Subscriber": 5,
-            "Viewer": 6,
-        }.get(str(role_name or "").strip(), 6)
+            "Product Tester": 4,
+            "Bot": 5,
+            "Subscriber": 6,
+            "Viewer": 7,
+        }.get(str(role_name or "").strip(), 7)
     def parse_viewer_sort_timestamp(self, raw_value):
         parsed = self.parse_profile_timestamp(raw_value)
         if parsed is None:
@@ -287,7 +297,7 @@ class DashboardViewersMixin:
         if category == "Channels Followed":
             return "Viewer"
         role_lookup = self.build_viewer_role_lookup()
-        username = str(item.get("user_name") or item.get("user_login") or "").strip()
+        username = self.normalize_viewer_username(item.get("user_name") or item.get("user_login"))
         return role_lookup.get(username, "Viewer")
     def sort_relationship_items(self, items, category):
         rows = list(items or [])
@@ -345,7 +355,7 @@ class DashboardViewersMixin:
                 {
                     "username": username,
                     "messages": int(profile.get("messages", 0) or 0),
-                    "role": role_lookup.get(username, "Viewer"),
+                    "role": role_lookup.get(self.normalize_viewer_username(username), "Viewer"),
                     "activity": self.derive_viewer_activity_state(profile),
                     "last_seen": profile.get("last_seen", ""),
                     "behavior": profile.get("behavior", "neutral"),
@@ -883,13 +893,14 @@ class DashboardViewersMixin:
                 widget.deleteLater()
 
         total_pages = max(getattr(self, "viewer_relationship_total_pages", 1), 1)
-        current_page = max(getattr(self, "viewer_relationship_current_page", 1), 1)
+        current_page = min(max(getattr(self, "viewer_relationship_current_page", 1), 1), total_pages)
+        is_loading = bool(getattr(self, "viewer_relationships_request_inflight", False))
 
         self.viewer_relationship_pagination_buttons_layout.addWidget(
             self.make_pagination_button(
                 "Previous",
                 lambda: self.set_relationship_page(current_page - 1),
-                enabled=current_page > 1,
+                enabled=not is_loading and current_page > 1,
                 minimum_width=74,
             )
         )
@@ -903,6 +914,7 @@ class DashboardViewersMixin:
                     str(page_number),
                     lambda checked=False, page=page_number: self.set_relationship_page(page),
                     active=page_number == current_page,
+                    enabled=not is_loading and page_number != current_page,
                 )
             )
 
@@ -910,7 +922,7 @@ class DashboardViewersMixin:
             self.make_pagination_button(
                 "Next",
                 lambda: self.set_relationship_page(current_page + 1),
-                enabled=current_page < total_pages,
+                enabled=not is_loading and current_page < total_pages,
                 minimum_width=64,
             )
         )
@@ -933,14 +945,26 @@ class DashboardViewersMixin:
         if hasattr(self, "viewer_table"):
             self.viewer_table.scrollToTop()
     def set_relationship_page(self, page_number):
-        target_page = min(max(int(page_number or 1), 1), max(getattr(self, "viewer_relationship_total_pages", 1), 1))
-        if target_page == getattr(self, "viewer_relationship_current_page", 1) and self.viewer_relationship_model.rowCount() > 0:
+        if getattr(self, "viewer_relationships_request_inflight", False):
+            return
+        try:
+            requested_page = int(page_number or 1)
+        except (TypeError, ValueError):
+            requested_page = 1
+        total_pages = max(getattr(self, "viewer_relationship_total_pages", 1), 1)
+        target_page = min(max(requested_page, 1), total_pages)
+        model = getattr(self, "viewer_relationships_model", None)
+        current_rows = model.rowCount() if model is not None else 0
+        if target_page == getattr(self, "viewer_relationship_current_page", 1) and current_rows > 0:
             return
         self.viewer_relationship_current_page = target_page
         self.refresh_viewer_relationships_panel()
         if hasattr(self, "viewer_relationships_table"):
             self.viewer_relationships_table.scrollToTop()
     def populate_relationship_table(self, rows):
+        model = getattr(self, "viewer_relationships_model", None)
+        if model is None:
+            return
         page_rows, current_page, total_pages, _total_items = self.paginate_rows(
             rows,
             getattr(self, "viewer_relationship_current_page", 1),
@@ -962,7 +986,7 @@ class DashboardViewersMixin:
             )
             for values in list(page_rows or [])
         ]
-        self.viewer_relationships_model.set_rows(
+        model.set_rows(
             model_rows,
             empty_row=self.make_incremental_table_row(
                 ("No data yet", "Reconnect/sync if needed", "--"),
@@ -974,7 +998,8 @@ class DashboardViewersMixin:
                 localized_columns={0, 1},
             ),
         )
-        self.viewer_relationships_table.scrollToTop()
+        if hasattr(self, "viewer_relationships_table"):
+            self.viewer_relationships_table.scrollToTop()
         self.rebuild_relationship_pagination_controls()
     def set_relationship_panel_expanded(self, expanded, animate=True):
         self.viewer_relationships_panel_expanded = bool(expanded)
@@ -1184,13 +1209,43 @@ class DashboardViewersMixin:
         if hasattr(self, "viewer_relationships_status_label"):
             self.set_localized_text(self.viewer_relationships_status_label, "Syncing Twitch relationship lists...")
 
-        def worker():
+        def worker(cancel_event=None):
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             payload = {
                 "state": self.sync_viewer_relationships_from_api(details),
             }
-            self.bridge.viewer_relationships_signal.emit(payload)
+            return payload
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_result(payload):
+            if payload is not None:
+                self.bridge.viewer_relationships_signal.emit(payload)
+
+        def on_error(error_text):
+            state = self.normalize_viewer_relationships_state(self.viewer_relationships_state)
+            state["last_error"] = f"Viewer relationship sync failed: {str(error_text).splitlines()[-1] if error_text else 'unknown error'}"
+            self.bridge.viewer_relationships_signal.emit({"state": state})
+
+        task_manager = getattr(self, "task_manager", None)
+        if task_manager is not None:
+            started = task_manager.start(
+                "viewer_relationships_sync",
+                worker,
+                on_success=on_result,
+                on_error=on_error,
+            )
+            if not started:
+                self.viewer_relationships_request_inflight = False
+                self.refresh_viewer_relationships_panel()
+            return
+
+        def thread_worker():
+            try:
+                on_result(worker())
+            except Exception as exc:
+                on_error(str(exc))
+
+        threading.Thread(target=thread_worker, daemon=True).start()
     def _apply_viewer_relationships_payload(self, payload):
         self.viewer_relationships_request_inflight = False
         self.viewer_relationships_last_fetch_at = time.time()
@@ -1303,6 +1358,18 @@ class DashboardViewersMixin:
             selector.blockSignals(False)
     def on_viewer_search_changed(self):
         self.viewer_current_page = 1
+        timer = getattr(self, "viewer_search_debounce_timer", None)
+        if timer is None:
+            try:
+                timer = QTimer(self)
+            except TypeError:
+                timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(self.apply_viewer_search_changed)
+            self.viewer_search_debounce_timer = timer
+        timer.start(250)
+
+    def apply_viewer_search_changed(self):
         self.refresh_viewers_dashboard()
     def populate_viewer_table(self, records):
         page_records, current_page, total_pages, _total_items = self.paginate_rows(
@@ -1382,12 +1449,33 @@ class DashboardViewersMixin:
         self.update_viewer_details_panel(selected_username)
         self.update_viewer_results_summary_label()
         self.rebuild_viewer_pagination_controls()
-    def refresh_viewers_dashboard(self):
+    def refresh_viewers_dashboard(self, force=False):
         if not hasattr(self, "viewer_table_model"):
             return
+        page_name = getattr(self, "current_page_name", "Dashboard")
+        if page_name != "Viewers" and not force:
+            return
+
+        if hasattr(self, "cached_file_changed"):
+            _users_changed, users_signature = self.cached_file_changed("users", USERS_FILE)
+            _dashboard_changed, dashboard_signature = self.cached_file_changed("dashboard_state", DASHBOARD_STATE_FILE)
+        else:
+            users_signature = None
+            dashboard_signature = None
+        search_query = self.viewer_search_input.text().strip().lower() if hasattr(self, "viewer_search_input") else ""
+        refresh_signature = (
+            users_signature,
+            dashboard_signature,
+            search_query,
+            getattr(self, "viewer_filter_name", "All"),
+            getattr(self, "viewer_sort_key", "messages"),
+            getattr(self, "viewer_current_page", 1),
+        )
+        if not force and refresh_signature == getattr(self, "viewer_dashboard_signature", None):
+            return
+        self.viewer_dashboard_signature = refresh_signature
 
         records = self.build_viewer_records()
-        search_query = self.viewer_search_input.text().strip().lower() if hasattr(self, "viewer_search_input") else ""
         if search_query:
             records = [record for record in records if search_query in record["username"].lower()]
         records = [record for record in records if self.viewer_matches_filter(record)]
@@ -1512,10 +1600,12 @@ class DashboardViewersMixin:
         username = self.selected_viewer_username
         if not username:
             return
-        profile = dict(self.users_data.get(username, {}))
-        profile.update(changes)
+        _changed, profile = save_user_profile_changes(username, changes, current_profiles=self.users_data)
         self.users_data[username] = profile
-        save_user_profiles(self.users_data)
+        if hasattr(self, "file_signature_cache"):
+            self.file_signature_cache.pop("users", None)
+        if hasattr(self, "viewer_dashboard_signature"):
+            self.viewer_dashboard_signature = None
         self.refresh_viewers_dashboard()
     def toggle_selected_viewer_mute(self):
         if not self.selected_viewer_username:

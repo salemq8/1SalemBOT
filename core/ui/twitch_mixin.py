@@ -10,17 +10,30 @@ from core.app_paths import TWITCH_GLITCH_LOGO_SVG
 from core.auth import (
     BOT_AUTH_ROLE,
     CHANNEL_AUTH_ROLE,
+    CLIENT_ID,
     REDIRECT_URI,
+    begin_role_auth_flow,
     clear_token,
+    exchange_device_code,
     extract_auth_state_from_redirect_url,
     extract_token_from_redirect_url,
     get_role_label,
     get_role_scopes,
     load_token_details,
+    mark_role_disconnected,
     open_twitch_login,
+    save_token_response,
     save_token,
+    set_role_auth_runtime_state,
+    start_device_code_authorization,
+    validate_token,
 )
+from core.twitch_api import get_user_by_login
+from .twitch_device_dialog import TwitchDeviceAuthDialog
 from .widgets import Card, StatusDot
+
+
+PROFILE_LOOKUP_COOLDOWN_SECONDS = 180
 
 
 class DashboardTwitchMixin:
@@ -316,22 +329,22 @@ class DashboardTwitchMixin:
         layout.addWidget(
             self.build_twitch_step_card(
                 1,
-                f"Connect {get_role_label(role)}",
-                "Open Twitch approval in the browser for this specific role.",
+                "Connect with Twitch",
+                "The app opens Twitch and shows a short authorization code for this specific role.",
             )
         )
         layout.addWidget(
             self.build_twitch_step_card(
                 2,
                 "Approve access",
-                "Twitch redirects to the registered URL after approval. Copy the full final browser URL.",
+                "Enter the displayed code if needed, then approve access on Twitch.",
             )
         )
         layout.addWidget(
             self.build_twitch_step_card(
                 3,
-                "Paste and save this role",
-                f"Save the token only into {get_role_label(role)} so sessions never get mixed.",
+                "Connected automatically",
+                f"1SalemBOT validates and securely saves only the {get_role_label(role)} session.",
             )
         )
 
@@ -340,21 +353,33 @@ class DashboardTwitchMixin:
         self.set_label_role(capability_label, "mutedBody")
         layout.addWidget(capability_label)
 
-        scope_label = QLabel("Required scopes: " + ", ".join(get_role_scopes(role)))
+        scope_label = QLabel("Required Twitch permissions are requested automatically for this role.")
         scope_label.setWordWrap(True)
         self.set_label_role(scope_label, "muted")
         layout.addWidget(scope_label)
 
+        legacy_frame = QFrame()
+        legacy_frame.setProperty("surfaceRole", "subtle")
+        legacy_frame.setVisible(False)
+        legacy_layout = QVBoxLayout(legacy_frame)
+        legacy_layout.setContentsMargins(12, 12, 12, 12)
+        legacy_layout.setSpacing(8)
         callback_note = QLabel(f"Registered Twitch redirect URL: {REDIRECT_URI}")
         callback_note.setWordWrap(True)
         self.set_label_role(callback_note, "muted")
-        layout.addWidget(callback_note)
+        legacy_layout.addWidget(callback_note)
+        legacy_scope_label = QLabel("Required scopes: " + ", ".join(get_role_scopes(role)))
+        legacy_scope_label.setWordWrap(True)
+        self.set_label_role(legacy_scope_label, "muted")
+        legacy_layout.addWidget(legacy_scope_label)
 
-        layout.addWidget(self.make_small_title("Browser Redirect URL"))
+        legacy_layout.addWidget(self.make_small_title("Browser Redirect URL"))
         redirect_entry = QLineEdit()
         redirect_entry.setPlaceholderText(f"Paste the full Twitch redirect URL for {title}")
         redirect_entry.setClearButtonEnabled(True)
-        layout.addWidget(redirect_entry)
+        legacy_layout.addWidget(redirect_entry)
+        save_button = self.make_button("Paste & Save", "primary", lambda: self.paste_and_save_redirect_token(role))
+        legacy_layout.addWidget(save_button, 0, Qt.AlignLeft)
 
         account_row = QHBoxLayout()
         account_row.setSpacing(12)
@@ -380,13 +405,18 @@ class DashboardTwitchMixin:
 
         actions_row = QHBoxLayout()
         actions_row.setSpacing(8)
-        connect_button = self.make_button(f"Connect {get_role_label(role)}", "twitch", lambda: self.login_with_twitch(role))
-        save_button = self.make_button("Paste & Save", "primary", lambda: self.paste_and_save_redirect_token(role))
+        connect_button = self.make_button("Connect with Twitch", "twitch", lambda: self.login_with_twitch(role))
         logout_button = self.make_button("Logout", "muted", lambda: self.logout_twitch_account(role))
+        legacy_toggle_button = self.make_button(
+            "Developer Diagnostics: Legacy Redirect Login",
+            "muted",
+            lambda frame=legacy_frame: frame.setVisible(not frame.isVisible()),
+        )
         actions_row.addWidget(connect_button)
-        actions_row.addWidget(save_button)
         actions_row.addWidget(logout_button)
+        actions_row.addWidget(legacy_toggle_button)
         layout.addLayout(actions_row)
+        layout.addWidget(legacy_frame)
 
         helper_label = QLabel()
         helper_label.setWordWrap(True)
@@ -417,6 +447,8 @@ class DashboardTwitchMixin:
             "connect_button": connect_button,
             "save_button": save_button,
             "logout_button": logout_button,
+            "legacy_frame": legacy_frame,
+            "legacy_toggle_button": legacy_toggle_button,
             "helper_label": helper_label,
             "copy_button": copy_button,
         }
@@ -500,31 +532,212 @@ class DashboardTwitchMixin:
         except Exception as exc:
             self.set_twitch_auth_feedback(role, f"Could not save the Twitch token: {exc}", "error")
             self.append_log(f"[TWITCH] Failed to save {get_role_label(role)} token: {exc}")
+    def twitch_device_auth_task_name(self, role):
+        return f"twitch_device_auth_{role}"
+
+    def emit_twitch_device_auth_event(self, role, request_id, **payload):
+        event = {"role": role, "request_id": request_id}
+        event.update(payload)
+        self.bridge.twitch_device_auth_signal.emit(event)
+
+    def friendly_twitch_device_error(self, error_code):
+        code = str(error_code or "").lower()
+        if code == "authorization_pending":
+            return "Waiting for Twitch authorization..."
+        if code == "slow_down":
+            return "Twitch asked the app to slow down. Waiting before checking again..."
+        if code in {"access_denied", "authorization_declined", "denied"}:
+            return "Twitch authorization was not approved."
+        if code in {"expired_token", "expired_device_code", "invalid_device_code"}:
+            return "This authorization code has expired. Generate a new code to continue."
+        if "timeout" in code or "connection" in code or "network" in code:
+            return "Could not reach Twitch. Check your internet connection and try again."
+        if "missing" in code and "scope" in code:
+            return "Twitch connected, but some required permissions were not approved. Please reconnect and approve all requested access."
+        return "Twitch authorization failed. Please try again."
+
+    def cancel_twitch_device_auth(self, role, request_id=None):
+        current_request = self.twitch_device_auth_request_ids.get(role)
+        if request_id is not None and request_id != current_request:
+            return
+        task_manager = getattr(self, "task_manager", None)
+        if task_manager is not None:
+            task_manager.cancel(self.twitch_device_auth_task_name(role))
+        set_role_auth_runtime_state(role, "needs_reconnect", "Authorization cancelled")
+        self.set_twitch_auth_feedback(role, "Cancelled", "warning")
+        self.refresh_token_status()
+        self.append_log(f"[TWITCH] {get_role_label(role)} authorization cancelled")
+
     def login_with_twitch(self, role=BOT_AUTH_ROLE):
-        try:
-            self.set_role_auth_health(role, "waiting", "Waiting for Twitch approval")
-            open_twitch_login(role)
-            self.set_twitch_auth_summary(
-                role,
-                "Browser opened",
-                f"Approve the Twitch request for {get_role_label(role)} in your browser. Then copy the final redirect URL and return here to save it.",
-                "info",
-            )
-            self.set_twitch_auth_feedback(
-                role,
-                "After approval, copy the full browser URL and click Paste & Save.",
-                "info",
-            )
-            self.append_log(f"[TWITCH] Opened login page for {get_role_label(role)}")
-        except Exception as exc:
-            self.set_twitch_auth_summary(
-                role,
-                "Could not open Twitch login",
-                f"Browser step failed: {exc}",
-                "error",
-            )
-            self.set_twitch_auth_feedback(role, f"Could not open the Twitch login page: {exc}", "error")
-            self.append_log(f"[TWITCH] Login open failed for {get_role_label(role)}: {exc}")
+        role = BOT_AUTH_ROLE if role == BOT_AUTH_ROLE else CHANNEL_AUTH_ROLE
+        task_name = self.twitch_device_auth_task_name(role)
+        task_manager = getattr(self, "task_manager", None)
+        if task_manager is not None and task_manager.is_running(task_name):
+            dialog = self.twitch_device_auth_dialogs.get(role)
+            if dialog is not None:
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+            self.append_log(f"[TWITCH] {get_role_label(role)} authorization already in progress")
+            return
+
+        begin_role_auth_flow(role)
+        self.twitch_device_auth_request_ids[role] = self.twitch_device_auth_request_ids.get(role, 0) + 1
+        request_id = self.twitch_device_auth_request_ids[role]
+        self.set_role_auth_health(role, "waiting", "Preparing Twitch authorization")
+        self.set_twitch_auth_summary(role, f"Connect {get_role_label(role)} to Twitch", "Preparing Twitch authorization.", "warning")
+        self.set_twitch_auth_feedback(role, "Preparing authorization", "warning")
+        self.refresh_token_status()
+        expected_login = self.current_bot_login() if role == BOT_AUTH_ROLE else self.current_channel_login()
+
+        dialog = TwitchDeviceAuthDialog(role=role, theme=self.theme, localize=self.localize, parent=self)
+        dialog.cancelled.connect(lambda role_name=role, rid=request_id: self.cancel_twitch_device_auth(role_name, rid))
+        self.twitch_device_auth_dialogs[role] = dialog
+        dialog.show()
+
+        def worker(cancel_event=None, role_name=role, rid=request_id, configured_login=expected_login):
+            try:
+                if cancel_event is not None and cancel_event.is_set():
+                    self.emit_twitch_device_auth_event(role_name, rid, state="cancelled", message="Cancelled")
+                    return {"cancelled": True}
+                self.emit_twitch_device_auth_event(role_name, rid, state="preparing", message="Preparing authorization")
+                session = start_device_code_authorization(role_name)
+                expires_at = time.time() + int(session.get("expires_in") or 0)
+                interval = max(1, int(session.get("interval") or 5))
+                self.emit_twitch_device_auth_event(
+                    role_name,
+                    rid,
+                    state="waiting",
+                    message="Waiting for Twitch authorization...",
+                    user_code=session.get("user_code"),
+                    verification_uri=session.get("verification_uri"),
+                    expires_at=expires_at,
+                    interval=interval,
+                )
+                while time.time() < expires_at:
+                    if cancel_event is not None and cancel_event.wait(interval):
+                        self.emit_twitch_device_auth_event(role_name, rid, state="cancelled", message="Cancelled")
+                        return {"cancelled": True}
+                    token_result = exchange_device_code(session.get("device_code"), role_name)
+                    if cancel_event is not None and cancel_event.is_set():
+                        self.emit_twitch_device_auth_event(role_name, rid, state="cancelled", message="Cancelled")
+                        return {"cancelled": True}
+                    if token_result.get("ok"):
+                        self.emit_twitch_device_auth_event(role_name, rid, state="validating", message="Validating account")
+                        validation = validate_token(token_result.get("access_token"))
+                        if cancel_event is not None and cancel_event.is_set():
+                            self.emit_twitch_device_auth_event(role_name, rid, state="cancelled", message="Cancelled")
+                            return {"cancelled": True}
+                        actual_login = str(validation.get("login") or "").strip()
+                        if configured_login and actual_login and configured_login.casefold() != actual_login.casefold():
+                            self.emit_twitch_device_auth_event(
+                                role_name,
+                                rid,
+                                state="failed",
+                                message=(
+                                    f"Twitch connected as {actual_login}, but this role is configured for {configured_login}. "
+                                    "Update the configured login or reconnect with the matching account."
+                                ),
+                            )
+                            return {"error": "wrong_account"}
+                        self.emit_twitch_device_auth_event(role_name, rid, state="saving", message="Saving session")
+                        details = save_token_response(token_result, role=role_name, source="device_code", validation_details=validation)
+                        self.emit_twitch_device_auth_event(
+                            role_name,
+                            rid,
+                            state="connected",
+                            message=f"Twitch connected. Connected as {details.get('display_name') or details.get('login') or actual_login}.",
+                            login=details.get("login", ""),
+                            display_name=details.get("display_name", ""),
+                        )
+                        return {"details": details}
+                    error_code = token_result.get("error")
+                    if error_code == "authorization_pending":
+                        continue
+                    if error_code == "slow_down":
+                        interval += 5
+                        self.emit_twitch_device_auth_event(role_name, rid, state="waiting", message=self.friendly_twitch_device_error(error_code))
+                        continue
+                    if error_code in {"access_denied", "authorization_declined", "denied"}:
+                        self.emit_twitch_device_auth_event(role_name, rid, state="denied", message=self.friendly_twitch_device_error(error_code))
+                        return {"error": error_code}
+                    if error_code in {"expired_token", "expired_device_code", "invalid_device_code"}:
+                        self.emit_twitch_device_auth_event(role_name, rid, state="expired", message=self.friendly_twitch_device_error(error_code))
+                        return {"error": error_code}
+                    self.emit_twitch_device_auth_event(role_name, rid, state="failed", message=self.friendly_twitch_device_error(error_code))
+                    return {"error": error_code}
+                self.emit_twitch_device_auth_event(role_name, rid, state="expired", message="This authorization code has expired. Generate a new code to continue.")
+                return {"error": "expired_device_code"}
+            except Exception as exc:
+                self.emit_twitch_device_auth_event(
+                    role_name,
+                    rid,
+                    state="failed",
+                    message=self.friendly_twitch_device_error(exc.__class__.__name__),
+                    diagnostic=exc.__class__.__name__,
+                )
+                return {"error": exc.__class__.__name__}
+
+        def on_error(error_text, role_name=role, rid=request_id):
+            self.emit_twitch_device_auth_event(role_name, rid, state="failed", message=self.friendly_twitch_device_error(error_text))
+
+        if task_manager is not None:
+            if not task_manager.start(task_name, worker, on_success=lambda _result: None, on_error=on_error):
+                self.append_log(f"[TWITCH] {get_role_label(role)} authorization already in progress")
+            return
+
+        threading.Thread(target=lambda: worker(), daemon=True).start()
+
+    def handle_twitch_device_auth_event(self, payload):
+        if not isinstance(payload, dict):
+            return
+        role = payload.get("role")
+        if role not in (BOT_AUTH_ROLE, CHANNEL_AUTH_ROLE):
+            return
+        request_id = payload.get("request_id")
+        if request_id != self.twitch_device_auth_request_ids.get(role):
+            return
+        state = str(payload.get("state") or "").strip()
+        dialog = self.twitch_device_auth_dialogs.get(role)
+        if dialog is not None:
+            dialog.update_state(payload)
+        status_map = {
+            "preparing": ("waiting", "Preparing Twitch authorization"),
+            "waiting": ("waiting", "Waiting for Twitch authorization"),
+            "validating": ("connecting", "Validating Twitch session"),
+            "saving": ("connecting", "Saving Twitch session"),
+            "connected": ("connected", "Twitch connected successfully."),
+            "failed": ("failed", payload.get("message") or "Twitch authorization failed"),
+            "expired": ("failed", "Code expired"),
+            "denied": ("failed", "Authorization declined"),
+            "cancelled": ("disconnected", "Cancelled"),
+        }
+        health_state, health_message = status_map.get(state, ("waiting", payload.get("message") or "Waiting for Twitch authorization"))
+        runtime_state_map = {
+            "preparing": "waiting_for_device_code",
+            "waiting": "waiting_for_user_approval",
+            "validating": "validating",
+            "saving": "validating",
+            "connected": "connected",
+            "failed": "failed",
+            "expired": "needs_reconnect",
+            "denied": "needs_reconnect",
+            "cancelled": "needs_reconnect",
+        }
+        if state in runtime_state_map and state != "connected":
+            set_role_auth_runtime_state(role, runtime_state_map[state], health_message, explicit_disconnected=False)
+        self.set_role_auth_health(role, health_state, health_message)
+        if state == "connected":
+            self.append_log(f"[TWITCH] {get_role_label(role)} connected")
+            self.refresh_token_status()
+            self.refresh_account_widget(force=True)
+            self.request_auth_health_check(force=True)
+            if role == CHANNEL_AUTH_ROLE:
+                self.ensure_alerts_listener(force=True)
+            return
+        if state in {"failed", "expired", "denied", "cancelled"}:
+            self.append_log(f"[TWITCH] {get_role_label(role)} authorization {state}")
+        self.refresh_token_status()
     def refresh_token_status(self):
         connection_state = self.get_auth_connection_state()
         bot_details = connection_state["bot_details"]
@@ -607,8 +820,7 @@ class DashboardTwitchMixin:
                 connect_button.setEnabled(True)
                 self.set_localized_text(
                     connect_button,
-                    "twitch.reconnect_role" if token else "twitch.connect_role",
-                    role=self.localize(get_role_label(role)),
+                    "Reconnect" if token else "Connect with Twitch",
                 )
             if save_button is not None:
                 save_button.setEnabled(True)
@@ -622,12 +834,12 @@ class DashboardTwitchMixin:
                     self.set_localized_text(connected_value, "Not connected")
 
             if token:
-                scope_count = len(details.get("scopes", []))
                 if token_meta_label is not None:
-                    meta_text = f"Saved token: {self.mask_token(token)}"
+                    meta_text = "Secure session saved"
                     if saved_at:
                         meta_text += f"  |  Saved at {saved_at}"
-                    meta_text += f"  |  {scope_count} granted scopes"
+                    if details.get("last_validated_at"):
+                        meta_text += f"  |  Last validated {details.get('last_validated_at')}"
                     self.set_localized_text(token_meta_label, meta_text)
 
                 if health_state != "connected":
@@ -675,7 +887,7 @@ class DashboardTwitchMixin:
                 self.set_twitch_auth_summary(role, title, body, "neutral")
                 self.set_twitch_auth_feedback(
                     role,
-                    "Open Twitch in the browser, approve access, then paste the final redirect URL here and save it for this role only.",
+                    "Press Connect with Twitch. The app will open Twitch, show a code, and save the approved session automatically.",
                     "neutral",
                 )
         self.update_dashboard_status_badge()
@@ -744,7 +956,22 @@ class DashboardTwitchMixin:
         elif selected == logout_channel_action:
             self.logout_twitch_account(CHANNEL_AUTH_ROLE)
     def logout_twitch_account(self, role=BOT_AUTH_ROLE):
-        if self.process is not None and self.process.poll() is None:
+        role = BOT_AUTH_ROLE if role == BOT_AUTH_ROLE else CHANNEL_AUTH_ROLE
+        task_manager = getattr(self, "task_manager", None)
+        if task_manager is not None:
+            task_manager.cancel(self.twitch_device_auth_task_name(role))
+            task_manager.cancel(f"auth_check_{role}")
+            task_manager.cancel(self.account_profile_task_name(role))
+        self.twitch_device_auth_request_ids[role] = self.twitch_device_auth_request_ids.get(role, 0) + 1
+        self.account_profile_request_ids[role] = self.account_profile_request_ids.get(role, 0) + 1
+        self.auth_health_request_ids[role] = self.auth_health_request_ids.get(role, 0) + 1
+        self.auth_health_inflight[role] = False
+        dialog = self.twitch_device_auth_dialogs.get(role)
+        if dialog is not None:
+            dialog.close()
+            self.twitch_device_auth_dialogs[role] = None
+        mark_role_disconnected(role)
+        if role == BOT_AUTH_ROLE and self.process is not None and self.process.poll() is None:
             self.stop_bot()
         if role == CHANNEL_AUTH_ROLE and hasattr(self, "stop_alerts_listener"):
             self.stop_alerts_listener()
@@ -759,6 +986,8 @@ class DashboardTwitchMixin:
         except Exception as exc:
             self.append_log(f"[TWITCH] Failed to log out {get_role_label(role)}: {exc}")
     def _apply_account_profile(self, payload):
+        if getattr(self, "_closing", False):
+            return
         role = payload.get("role", BOT_AUTH_ROLE)
         request_id = payload.get("request_id")
         current_request_id = self.account_profile_request_ids.get(role)
@@ -788,6 +1017,34 @@ class DashboardTwitchMixin:
             status_state=self.auth_dot_state(self.get_role_auth_health(role)),
             status_tooltip=self.auth_dot_tooltip(role, self.get_role_auth_health(role)),
         )
+    def account_profile_task_name(self, role):
+        return f"account_profile_{role}"
+    def account_profile_failure_key(self, error):
+        return str(error or "").strip().splitlines()[-1][:180]
+    def should_skip_account_profile_lookup(self, role, error_key, *, force=False):
+        if force:
+            return False
+        state = getattr(self, "account_profile_failure_state", {}).get(role, {})
+        if not state:
+            return False
+        if state.get("error") != error_key:
+            return False
+        return time.time() < float(state.get("next_retry_at", 0.0) or 0.0)
+    def mark_account_profile_failure(self, role, error):
+        error_key = self.account_profile_failure_key(error)
+        state = getattr(self, "account_profile_failure_state", {}).setdefault(role, {"error": "", "next_retry_at": 0.0})
+        should_log = state.get("error") != error_key
+        state["error"] = error_key
+        state["next_retry_at"] = time.time() + PROFILE_LOOKUP_COOLDOWN_SECONDS
+        if should_log:
+            self.bridge.log_signal.emit(f"[TWITCH] {get_role_label(role)} profile lookup failed: {error_key}")
+        return error_key
+    def mark_account_profile_success(self, role):
+        state = getattr(self, "account_profile_failure_state", {}).setdefault(role, {"error": "", "next_retry_at": 0.0})
+        if state.get("error"):
+            self.bridge.log_signal.emit(f"[TWITCH] {get_role_label(role)} profile lookup recovered")
+        state["error"] = ""
+        state["next_retry_at"] = 0.0
     def _base_sidebar_account_payload(self, role, request_id, display_name, login_name, *, connected):
         return {
             "role": role,
@@ -807,15 +1064,34 @@ class DashboardTwitchMixin:
         lookup_login = stored_login or configured_login
         display_login = stored_display_name or lookup_login or configured_login
 
+        lookup_signature = "|".join(
+            [
+                str(role),
+                str(lookup_login or "").strip().lower(),
+                str(stored_profile_image_url or "").strip(),
+                "token" if token else "no-token",
+            ]
+        )
+        task_manager = getattr(self, "task_manager", None)
+        task_name = self.account_profile_task_name(role)
+        if task_manager is not None and task_manager.is_running(task_name):
+            if force or self.account_profile_lookup_signatures.get(role) != lookup_signature:
+                task_manager.cancel(task_name)
+            else:
+                return
+
         self.account_profile_request_ids[role] = self.account_profile_request_ids.get(role, 0) + 1
         request_id = self.account_profile_request_ids[role]
+        self.account_profile_lookup_signatures[role] = lookup_signature
 
         if not token:
+            if task_manager is not None:
+                task_manager.cancel(task_name)
             self._apply_account_profile(
                 self._base_sidebar_account_payload(
                     role,
                     request_id,
-                display_login or "Not connected",
+                    display_login or "Not connected",
                     stored_login or configured_login or ("bot" if role == BOT_AUTH_ROLE else "channel"),
                     connected=False,
                 )
@@ -832,7 +1108,17 @@ class DashboardTwitchMixin:
             )
         )
 
-        def worker():
+        failure_state = getattr(self, "account_profile_failure_state", {}).get(role, {})
+        if (
+            not force
+            and failure_state.get("error")
+            and time.time() < float(failure_state.get("next_retry_at", 0.0) or 0.0)
+        ):
+            return
+
+        def worker(cancel_event=None):
+            if cancel_event is not None and cancel_event.is_set():
+                return None
             try:
                 user = None
                 avatar_bytes = None
@@ -844,11 +1130,12 @@ class DashboardTwitchMixin:
                     try:
                         user = get_user_by_login(CLIENT_ID, token, lookup_login)
                     except Exception as exc:
-                        self.bridge.log_signal.emit(
-                            f"[TWITCH] {get_role_label(role)} profile lookup failed for {lookup_login}: {exc}"
-                        )
+                        error_key = self.mark_account_profile_failure(role, exc)
+                        if self.should_skip_account_profile_lookup(role, error_key, force=force):
+                            return None
 
                 if user:
+                    self.mark_account_profile_success(role)
                     display_name = user.get("display_name") or display_name
                     login_name = user.get("login") or login_name
                     avatar_url = user.get("profile_image_url") or avatar_url
@@ -859,13 +1146,8 @@ class DashboardTwitchMixin:
                         response.raise_for_status()
                         avatar_bytes = response.content
                     except Exception as exc:
-                        self.bridge.log_signal.emit(
-                            f"[TWITCH] {get_role_label(role)} avatar load failed from {avatar_url}: {exc}"
-                        )
-                else:
-                    self.bridge.log_signal.emit(
-                        f"[TWITCH] {get_role_label(role)} avatar URL missing; using fallback avatar"
-                    )
+                        if force:
+                            self.bridge.log_signal.emit(f"[TWITCH] {get_role_label(role)} avatar load failed: {exc}")
 
                 payload = self._base_sidebar_account_payload(
                     role,
@@ -875,23 +1157,39 @@ class DashboardTwitchMixin:
                     connected=True,
                 )
                 payload["avatar_bytes"] = avatar_bytes
-                self.bridge.account_signal.emit(payload)
+                return payload
             except Exception as exc:
                 if force:
-                    self.bridge.log_signal.emit(
-                        f"[TWITCH] Failed to refresh {get_role_label(role)} sidebar card: {exc}"
-                    )
-                self.bridge.account_signal.emit(
-                    self._base_sidebar_account_payload(
-                        role,
-                        request_id,
-                        display_login or stored_login or "Connected",
-                        display_login or stored_login or ("bot" if role == BOT_AUTH_ROLE else "channel"),
-                        connected=True,
-                    )
+                    self.mark_account_profile_failure(role, exc)
+                return self._base_sidebar_account_payload(
+                    role,
+                    request_id,
+                    display_login or stored_login or "Connected",
+                    display_login or stored_login or ("bot" if role == BOT_AUTH_ROLE else "channel"),
+                    connected=True,
                 )
 
-        threading.Thread(target=worker, daemon=True).start()
+        def on_result(payload):
+            if payload is not None and not getattr(self, "_closing", False):
+                self.bridge.account_signal.emit(payload)
+
+        def on_error(error_text):
+            self.mark_account_profile_failure(role, error_text)
+            on_result(
+                self._base_sidebar_account_payload(
+                    role,
+                    request_id,
+                    display_login or stored_login or "Connected",
+                    display_login or stored_login or ("bot" if role == BOT_AUTH_ROLE else "channel"),
+                    connected=True,
+                )
+            )
+
+        if task_manager is not None:
+            task_manager.start(task_name, worker, on_success=on_result, on_error=on_error)
+            return
+
+        on_result(worker())
     def refresh_account_widget(self, force=False):
         self._refresh_sidebar_account(BOT_AUTH_ROLE, force=force)
         self._refresh_sidebar_account(CHANNEL_AUTH_ROLE, force=force)

@@ -6,7 +6,7 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QListWidget, QMenu, QPushButton, QSlider, QVBoxLayout, QWidget
 
-from core.app_paths import APP_NAME, MUSIC_COMMAND_FILE, SETTINGS_FILE
+from core.app_paths import APP_NAME, MUSIC_COMMAND_FILE, MUSIC_QUEUE_STATE_FILE, SETTINGS_FILE
 from core.app_state import default_music_command, load_json, save_json
 from core.music_content_filter import is_track_blocked_by_policy, music_policy_block_message
 from core.music_metadata import is_youtube_url, resolve_track_metadata
@@ -23,6 +23,23 @@ class DashboardMusicMixin:
     SKIP_NEXT_TRACK_MAX_DELAY_MS = 5000
     SKIP_NEXT_TRACK_PREFERRED_DELAY_MS = 100
     PLAYLIST_IMPORT_LIMIT = DEFAULT_PLAYLIST_IMPORT_LIMIT
+    def music_lifecycle_lock(self):
+        lock = getattr(self, "music_playback_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self.music_playback_lock = lock
+        return lock
+    def next_music_playback_generation(self):
+        generation = int(getattr(self, "music_playback_generation", 0) or 0) + 1
+        self.music_playback_generation = generation
+        return generation
+    def cancel_music_playback_work(self):
+        return self.next_music_playback_generation()
+    def is_music_playback_current(self, generation):
+        return (
+            not bool(getattr(self, "_closing", False))
+            and int(getattr(self, "music_playback_generation", 0) or 0) == int(generation)
+        )
     def make_music_controls_row(self, paste_callback, play_callback, compact=False):
         row = QHBoxLayout()
         row.setSpacing(8 if not compact else 6)
@@ -96,6 +113,8 @@ class DashboardMusicMixin:
         self.settings["audio_volume"] = int(self.audio_volume)
         self.settings["audio_muted"] = bool(self.audio_muted)
         save_json(SETTINGS_FILE, self.settings)
+    def clamp_master_volume(self, value):
+        return max(0, min(100, int(value)))
     def sync_volume_controls(self):
         label_text = f"{self.audio_volume}%"
         mute_text = "Unmute" if self.audio_muted else "Mute"
@@ -111,12 +130,13 @@ class DashboardMusicMixin:
 
         for button in self.volume_mute_buttons:
             self.set_localized_text(button, mute_text)
-    def apply_audio_state_from_player(self, state, *, persist=False):
+    def apply_audio_state_from_player(self, state, *, persist=False, allow_volume_update=False):
         if not state:
             return
         previous_bound = self.audio_session_attached
-        self.audio_volume = max(0, min(100, int(state.get("volume", self.audio_volume))))
-        self.audio_muted = bool(state.get("muted", self.audio_muted))
+        if allow_volume_update:
+            self.audio_volume = self.clamp_master_volume(state.get("volume", self.audio_volume))
+            self.audio_muted = bool(state.get("muted", self.audio_muted))
         self.audio_session_attached = bool(state.get("session_bound"))
         self.sync_volume_controls()
         if persist:
@@ -124,24 +144,37 @@ class DashboardMusicMixin:
         if self.audio_session_attached and not previous_bound:
             display_name = state.get("display_name") or APP_NAME
             self.append_log(f"[Audio] Windows audio session attached as {display_name}")
+    def apply_master_volume_to_player(self, reason="", *, persist=False, update_controls=True):
+        self.audio_volume = self.clamp_master_volume(self.audio_volume)
+        self.audio_muted = bool(self.audio_muted)
+        if update_controls:
+            self.sync_volume_controls()
+        if persist:
+            self.persist_audio_settings()
+
+        player = getattr(self, "music_player", None)
+        if not getattr(self, "music_player_initialized", False) or player is None:
+            return False
+        try:
+            player.set_volume(self.audio_volume)
+            player.set_muted(self.audio_muted)
+            state = player.get_audio_state()
+            self.apply_audio_state_from_player(state, persist=False, allow_volume_update=False)
+            return True
+        except Exception as exc:
+            if reason:
+                self.append_log(f"[Audio] Failed to apply master volume during {reason}: {exc}")
+            return False
     def push_audio_state_to_player(self, *, persist=False):
-        player = self.ensure_music_player()
-        if player is None:
-            return
-        player.set_volume(self.audio_volume)
-        player.set_muted(self.audio_muted)
-        state = player.get_audio_state()
-        self.apply_audio_state_from_player(state, persist=persist)
+        self.apply_master_volume_to_player("push", persist=persist)
     def set_master_volume(self, value, *, persist=True):
-        self.audio_volume = max(0, min(100, int(value)))
-        self.sync_volume_controls()
-        self.push_audio_state_to_player(persist=persist)
+        self.audio_volume = self.clamp_master_volume(value)
+        self.apply_master_volume_to_player("set_master_volume", persist=persist)
     def adjust_master_volume(self, delta):
         self.set_master_volume(self.audio_volume + int(delta))
     def toggle_audio_mute(self):
         self.audio_muted = not self.audio_muted
-        self.sync_volume_controls()
-        self.push_audio_state_to_player(persist=True)
+        self.apply_master_volume_to_player("toggle_mute", persist=True)
     def poll_audio_state(self):
         if not self.music_player_initialized or self.music_player is None:
             return
@@ -151,8 +184,17 @@ class DashboardMusicMixin:
             return
         if not state:
             return
-        if int(state.get("volume", self.audio_volume)) != self.audio_volume or bool(state.get("muted", self.audio_muted)) != self.audio_muted or bool(state.get("session_bound")) != self.audio_session_attached:
-            self.apply_audio_state_from_player(state, persist=True)
+        session_bound = bool(state.get("session_bound"))
+        backend_volume = int(state.get("backend_volume", state.get("volume", self.audio_volume)) or 0)
+        backend_muted = bool(state.get("backend_muted", state.get("muted", self.audio_muted)))
+        if (
+            session_bound != self.audio_session_attached
+            or backend_volume != self.audio_volume
+            or backend_muted != self.audio_muted
+        ):
+            self.apply_master_volume_to_player("audio_poll", persist=False)
+            return
+        self.apply_audio_state_from_player(state, persist=False, allow_volume_update=False)
     def build_volume_controls_row(self, *, compact=False):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -348,6 +390,28 @@ class DashboardMusicMixin:
         query_text = str(query or "").strip()
         title = self.queue_title_store().get(query_text, "")
         return self.clean_track_display_title(title, query_text)
+    def publish_music_queue_state(self):
+        try:
+            queue_items = [
+                {"position": index, "query": str(query), "title": self.display_track_name(query)}
+                for index, query in enumerate(getattr(self, "music_queue", []), start=1)
+            ]
+            save_json(
+                MUSIC_QUEUE_STATE_FILE,
+                {
+                    "current": {
+                        "query": str(getattr(self, "current_track_query", "") or ""),
+                        "title": str(getattr(self, "current_track_title", "") or ""),
+                        "active": bool(getattr(self, "current_track_active", False)),
+                        "loading": bool(getattr(self, "music_loading", False)),
+                    },
+                    "queue": queue_items,
+                    "count": len(queue_items),
+                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+        except Exception as exc:
+            self.append_log(f"[Music] Queue state update failed: {exc}")
     def is_duplicate_track_query(self, query, *, seen=None):
         if not getattr(self, "prevent_duplicate_tracks", True):
             return False
@@ -367,6 +431,7 @@ class DashboardMusicMixin:
         display_title = self.set_music_queue_title(query, display_name)
         self.music_queue.append(query)
         self.refresh_queue_list_widgets()
+        self.publish_music_queue_state()
         self.append_log(f"[Music] Track added to queue: {display_title}")
         return True
     def filter_duplicate_queue_entries(self, entries):
@@ -446,6 +511,8 @@ class DashboardMusicMixin:
 
         if clear_ui and hasattr(self, "thumbnail_label") and hasattr(self, "music_page_thumbnail"):
             self.clear_current_track_ui()
+        if hasattr(self, "update_runtime_timer_policy"):
+            self.update_runtime_timer_policy()
     def _apply_cover_pixmap(self, pixmap_payload):
         if pixmap_payload is None:
             self.thumbnail_label.clear_thumbnail(THUMBNAIL_PLACEHOLDER)
@@ -463,6 +530,8 @@ class DashboardMusicMixin:
         self.thumbnail_label.set_pixmap(pixmap)
         self.music_page_thumbnail.set_pixmap(pixmap)
     def reset_music_session_state(self):
+        self.cancel_music_playback_work()
+        self.music_skip_in_progress = False
         self.music_queue = []
         self.queue_title_store().clear()
         save_json(MUSIC_COMMAND_FILE, default_music_command())
@@ -477,6 +546,7 @@ class DashboardMusicMixin:
                 pass
 
         self.refresh_queue_list_widgets()
+        self.publish_music_queue_state()
         if hasattr(self, "thumbnail_label") and hasattr(self, "music_page_thumbnail"):
             self.clear_current_track_ui()
     def setup_queue_widget(self, widget):
@@ -555,6 +625,7 @@ class DashboardMusicMixin:
             return
         self.music_queue[index], self.music_queue[target] = self.music_queue[target], self.music_queue[index]
         self.refresh_queue_list_widgets(selected_index=target)
+        self.publish_music_queue_state()
         self.append_log(f"[Music] Queue item moved {'up' if delta < 0 else 'down'}")
     def move_selected_queue_item(self, widget, delta):
         self.move_queue_item(widget.currentRow(), delta)
@@ -567,12 +638,14 @@ class DashboardMusicMixin:
         self.music_queue = []
         self.queue_title_store().clear()
         self.refresh_queue_list_widgets()
+        self.publish_music_queue_state()
         self.append_log(f"[Music] Queue cleared ({removed_count} tracks removed)")
     def remove_queue_item_at(self, index: int):
         if index < 0 or index >= len(self.music_queue):
             return
         removed = self.music_queue.pop(index)
         self.refresh_queue_list_widgets()
+        self.publish_music_queue_state()
         self.append_log(f"Removed from queue: {self.display_track_name(removed)}")
     def remove_selected_queue_item(self, widget):
         self.remove_queue_item_at(widget.currentRow())
@@ -582,18 +655,57 @@ class DashboardMusicMixin:
         for label in getattr(self, "queue_count_labels", []):
             self.set_dynamic_text(label, label_text)
     def refresh_queue_list_widgets(self, selected_index=None):
+        queue_signature = (
+            getattr(self, "language", "en"),
+            tuple((str(item), self.display_track_name(item)) for item in self.music_queue),
+        )
+        if selected_index is None and queue_signature == getattr(self, "music_queue_render_signature", None):
+            return
+        self.music_queue_render_signature = queue_signature
         for widget in [getattr(self, "queue_listbox", None), getattr(self, "music_page_queue", None)]:
             if widget is None:
                 continue
-            widget.clear()
-            if not self.music_queue:
-                widget.addItem(self.localize("No queued tracks"))
-            else:
-                for index, item in enumerate(self.music_queue, start=1):
-                    widget.addItem(f"{index}. {self.display_track_name(item)}")
-                if selected_index is not None:
-                    widget.setCurrentRow(max(0, min(int(selected_index), len(self.music_queue) - 1)))
+            if queue_signature != getattr(widget, "_music_queue_render_signature", None):
+                widget.clear()
+                if not self.music_queue:
+                    widget.addItem(self.localize("No queued tracks"))
+                else:
+                    for index, item in enumerate(self.music_queue, start=1):
+                        widget.addItem(f"{index}. {self.display_track_name(item)}")
+                widget._music_queue_render_signature = queue_signature
+            if selected_index is not None and self.music_queue:
+                widget.setCurrentRow(max(0, min(int(selected_index), len(self.music_queue) - 1)))
         self.refresh_queue_count_labels()
+    def apply_music_volume_command(self, argument, *, source="external"):
+        value = str(argument or "").strip()
+        if not value:
+            self.append_log("[Music] Volume command usage: !volume 50, !volume +10, or !volume -10")
+            return False
+        try:
+            if value.startswith(("+", "-")):
+                target = self.audio_volume + int(value)
+            else:
+                target = int(value)
+        except Exception:
+            self.append_log("[Music] Volume command usage: !volume 50, !volume +10, or !volume -10")
+            return False
+        target = max(0, min(100, target))
+        self.set_master_volume(target, persist=True)
+        self.append_log(f"[Music] Volume set to {target}% from {source}")
+        return True
+    def apply_music_remove_command(self, argument, *, source="external"):
+        try:
+            position = int(str(argument or "").strip())
+        except Exception:
+            self.append_log("[Music] Remove command usage: !remove 3")
+            return False
+        if position < 1 or position > len(self.music_queue):
+            self.append_log(f"[Music] Remove command ignored: queue position {position} is not available")
+            return False
+        title = self.display_track_name(self.music_queue[position - 1])
+        self.remove_queue_item_at(position - 1)
+        self.append_log(f"[Music] Removed queue position {position} from {source}: {title}")
+        return True
     def handle_music_action(self, action: str, query: str = "", source: str = "ui"):
         normalized_action = (action or "").strip().lower()
         normalized_query = (query or "").strip()
@@ -616,6 +728,14 @@ class DashboardMusicMixin:
             self.stop_youtube_audio()
             return
 
+        if normalized_action == "volume":
+            self.apply_music_volume_command(normalized_query, source=source)
+            return
+
+        if normalized_action == "remove":
+            self.apply_music_remove_command(normalized_query, source=source)
+            return
+
         self.append_log(f"Unknown music action ignored: {normalized_action}")
     def start_track_playback(self, query: str):
         player = self.ensure_music_player()
@@ -623,54 +743,72 @@ class DashboardMusicMixin:
             self.append_log("Music player is unavailable")
             return
 
+        generation = self.next_music_playback_generation()
         self.music_loading = True
         self.current_track_active = False
         self.current_track_title = ""
         self.current_track_query = query
         self.current_track_started_at = 0.0
         self.append_log(f"[Music] Loading request: {query}")
+        if hasattr(self, "update_runtime_timer_policy"):
+            self.update_runtime_timer_policy()
 
         def worker():
             try:
-                self.bridge.log_signal.emit(f"[Music] Resolving track for: {query}")
-                track = player.load(query)
-                self.bridge.log_signal.emit(f"[Music] Resolved track: {track.title}")
-                self.bridge.log_signal.emit("[Music] Starting VLC playback")
-                player.play_loaded()
+                with self.music_lifecycle_lock():
+                    if not self.is_music_playback_current(generation):
+                        return
+                    self.bridge.log_signal.emit(f"[Music] Resolving track for: {query}")
+                    track = player.load(query)
+                    if not self.is_music_playback_current(generation):
+                        return
+                    self.bridge.log_signal.emit(f"[Music] Resolved track: {track.title}")
+                    self.bridge.log_signal.emit("[Music] Starting VLC playback")
+                    self.apply_master_volume_to_player("track_start", persist=False)
+                    player.play_loaded()
+                    self.apply_master_volume_to_player("track_started", persist=False)
 
-                wait_started_at = time.time()
-                last_logged_state = None
-                while time.time() - wait_started_at < 10:
-                    state = player.get_state()
-                    state_text = str(state) if state is not None else "None"
-                    if state_text != last_logged_state:
-                        self.bridge.log_signal.emit(f"[Music] VLC state: {state_text}")
-                        last_logged_state = state_text
-                    if player.is_playing():
-                        break
-                    if state is not None and str(state).lower().endswith("error"):
-                        raise RuntimeError("VLC reported an error while starting playback")
-                    time.sleep(0.25)
+                    wait_started_at = time.time()
+                    last_logged_state = None
+                    while time.time() - wait_started_at < 10:
+                        if not self.is_music_playback_current(generation):
+                            return
+                        state = player.get_state()
+                        state_text = str(state) if state is not None else "None"
+                        if state_text != last_logged_state:
+                            self.bridge.log_signal.emit(f"[Music] VLC state: {state_text}")
+                            last_logged_state = state_text
+                        if player.is_playing():
+                            break
+                        if state is not None and str(state).lower().endswith("error"):
+                            raise RuntimeError("VLC reported an error while starting playback")
+                        time.sleep(0.25)
 
-                if not player.is_playing():
-                    final_state = player.get_state()
-                    raise RuntimeError(f"Playback did not start in time (last state: {final_state})")
+                    if not self.is_music_playback_current(generation):
+                        return
+                    if not player.is_playing():
+                        final_state = player.get_state()
+                        raise RuntimeError(f"Playback did not start in time (last state: {final_state})")
 
-                audio_state = player.get_audio_state()
-                if audio_state.get("session_bound"):
-                    self.bridge.log_signal.emit(
-                        f"[Audio] Session ready as {audio_state.get('display_name') or APP_NAME}"
-                    )
-                self.music_loading = False
-                self.current_track_active = True
-                self.current_track_title = track.title
-                self.current_track_query = query
-                self.current_track_started_at = time.time()
+                    audio_state = player.get_audio_state()
+                    if audio_state.get("session_bound"):
+                        self.bridge.log_signal.emit(
+                            f"[Audio] Session ready as {audio_state.get('display_name') or APP_NAME}"
+                        )
+                    self.music_loading = False
+                    self.current_track_active = True
+                    self.current_track_title = track.title
+                    self.current_track_query = query
+                    self.current_track_started_at = time.time()
 
-                self.bridge.title_signal.emit(track.title)
-                self.bridge.log_signal.emit(f"[Music] Playing: {track.title}")
+                    self.bridge.title_signal.emit(track.title)
+                    self.bridge.log_signal.emit(f"[Music] Playing: {track.title}")
 
+                if not self.is_music_playback_current(generation):
+                    return
                 image = player.get_thumbnail_image()
+                if not self.is_music_playback_current(generation):
+                    return
                 if image:
                     buffer = io.BytesIO()
                     image.save(buffer, format="PNG")
@@ -681,14 +819,15 @@ class DashboardMusicMixin:
                     self.bridge.clear_cover_signal.emit()
             except Exception as exc:
                 last_state = player.get_state() if player is not None else "unavailable"
-                self.bridge.log_signal.emit(f"[Music] Failed to play audio: {exc}")
-                self.bridge.log_signal.emit(f"[Music] Last VLC state: {last_state}")
-                self.music_loading = False
-                self.current_track_active = False
-                self.current_track_title = ""
-                self.current_track_query = ""
-                self.current_track_started_at = 0.0
-                self.bridge.clear_cover_signal.emit()
+                if self.is_music_playback_current(generation):
+                    self.bridge.log_signal.emit(f"[Music] Failed to play audio: {exc}")
+                    self.bridge.log_signal.emit(f"[Music] Last VLC state: {last_state}")
+                    self.music_loading = False
+                    self.current_track_active = False
+                    self.current_track_title = ""
+                    self.current_track_query = ""
+                    self.current_track_started_at = 0.0
+                    self.bridge.clear_cover_signal.emit()
 
         threading.Thread(target=worker, daemon=True).start()
     def inspect_track_request(self, query: str):
@@ -857,6 +996,7 @@ class DashboardMusicMixin:
                 self.music_queue = remaining_queries + self.music_queue
 
         self.refresh_queue_list_widgets()
+        self.publish_music_queue_state()
         self.append_log(f"[Music] Added {len(queries)} tracks from playlist.")
         if payload.get("truncated"):
             self.append_log(f"[Music] Playlist import limited to first {self.PLAYLIST_IMPORT_LIMIT} tracks")
@@ -890,11 +1030,13 @@ class DashboardMusicMixin:
         if self.music_queue:
             next_query = self.music_queue.pop(0)
             self.refresh_queue_list_widgets()
+            self.publish_music_queue_state()
             self.append_log(f"[Music] Playing next queued track: {self.display_track_name(next_query)}")
             self.start_track_playback(next_query)
         else:
             self.reset_current_track_state(clear_player=True, clear_ui=True)
             self.refresh_queue_list_widgets()
+            self.publish_music_queue_state()
             self.append_log("[Music] Queue empty - No track loaded")
     def schedule_play_next_in_queue(self):
         QTimer.singleShot(0, self.play_next_in_queue)
@@ -906,13 +1048,22 @@ class DashboardMusicMixin:
             if advanced["done"]:
                 return
             advanced["done"] = True
+            if getattr(self, "_closing", False):
+                self.music_skip_in_progress = False
+                return
             if not stop_completed["done"]:
                 self.append_log("[Music] Skip handoff reached 5s cap; starting next queued track")
             else:
                 self.append_log(f"[Music] Skip handoff ready: {reason}")
-            self.play_next_in_queue()
+            try:
+                self.play_next_in_queue()
+            finally:
+                self.music_skip_in_progress = False
 
         def poll_stop():
+            if getattr(self, "_closing", False):
+                self.music_skip_in_progress = False
+                return
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
             if stop_completed["done"]:
                 advance_once("current playback stopped")
@@ -930,13 +1081,18 @@ class DashboardMusicMixin:
             return
 
         try:
+            self.cancel_music_playback_work()
+            self.music_skip_in_progress = False
             player.stop()
             self.music_loading = False
             self.music_queue = []
             self.queue_title_store().clear()
             self.refresh_queue_list_widgets()
+            self.publish_music_queue_state()
             self.reset_current_track_state(clear_player=True, clear_ui=True)
             self.append_log("Audio stopped and queue cleared")
+            if hasattr(self, "update_runtime_timer_policy"):
+                self.update_runtime_timer_policy()
         except Exception as exc:
             self.append_log(f"Failed to stop audio: {exc}")
     def skip_current_track(self):
@@ -947,6 +1103,11 @@ class DashboardMusicMixin:
 
         try:
             if self.current_track_active or self.music_loading or player.is_playing():
+                if getattr(self, "music_skip_in_progress", False):
+                    self.append_log("[Music] Skip already in progress")
+                    return
+                self.music_skip_in_progress = True
+                self.cancel_music_playback_work()
                 stop_completed = {"done": False}
 
                 def stop_worker():
@@ -960,15 +1121,24 @@ class DashboardMusicMixin:
                 threading.Thread(target=stop_worker, daemon=True).start()
                 self.reset_current_track_state(clear_player=True, clear_ui=True)
                 self.append_log("[Music] Track skipped")
+                if hasattr(self, "update_runtime_timer_policy"):
+                    self.update_runtime_timer_policy()
                 if self.music_queue:
                     self.schedule_skip_queue_advance(stop_completed)
                 else:
-                    self.play_next_in_queue()
+                    try:
+                        self.play_next_in_queue()
+                    finally:
+                        self.music_skip_in_progress = False
             else:
+                self.music_skip_in_progress = False
                 self.reset_current_track_state(clear_player=True, clear_ui=True)
                 self.refresh_queue_list_widgets()
                 self.append_log("[Music] No current track to skip - No track loaded")
+                if hasattr(self, "update_runtime_timer_policy"):
+                    self.update_runtime_timer_policy()
         except Exception as exc:
+            self.music_skip_in_progress = False
             self.append_log(f"Failed to skip track: {exc}")
     def monitor_music_state(self):
         try:
@@ -977,11 +1147,17 @@ class DashboardMusicMixin:
                     self.append_log(f"Track ended: {self.current_track_title}")
                     self.current_track_active = False
                     self.current_track_title = ""
+                    if hasattr(self, "update_runtime_timer_policy"):
+                        self.update_runtime_timer_policy()
                     self.play_next_in_queue()
         except Exception as exc:
             self.append_log(f"Music monitor error: {exc}")
     def process_music_command(self):
         try:
+            if hasattr(self, "cached_file_changed"):
+                changed, _ = self.cached_file_changed("music_command", MUSIC_COMMAND_FILE)
+                if not changed:
+                    return
             data = load_json(MUSIC_COMMAND_FILE, default_music_command())
             timestamp = data.get("timestamp")
             action = data.get("action")

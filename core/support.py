@@ -21,7 +21,7 @@ SECRET_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\"']+"),
     re.compile(r"(?i)(authorization\s*[=:]\s*)[^\r\n]+"),
     re.compile(
-        r"(?i)([\"']?(?:access_token|refresh_token|id_token|openai_api_key|api[_-]?key|client_secret|password|secret|credential|credentials|token)[\"']?\s*[=:]\s*[\"']?)[^\s,;\"'\}\]]+"
+        r"(?i)([\"']?(?:access_token|refresh_token|device_code|user_code|id_token|openai_api_key|api[_-]?key|client_secret|password|secret|credential|credentials|token)[\"']?\s*[=:]\s*[\"']?)[^\s,;\"'\}\]]+"
     ),
     re.compile(r"(?i)(cookie\s*[:=]\s*)[^\r\n]+"),
     re.compile(r"(?i)(set-cookie\s*[:=]\s*)[^\r\n]+"),
@@ -32,6 +32,8 @@ SENSITIVE_FILE_NAMES = (
     "twitch_auth.json",
     "twitch_bot_auth.json",
     "twitch_channel_auth.json",
+    "twitch_bot_auth.dpapi",
+    "twitch_channel_auth.dpapi",
     "bot_runtime.json",
     "alert_runtime.json",
     "music_command.json",

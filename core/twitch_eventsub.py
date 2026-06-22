@@ -54,9 +54,15 @@ class TwitchEventSubClient:
         self._last_keepalive_summary_at = time.monotonic()
         self._last_keepalive_at = 0.0
         self._last_message_at = 0.0
+        self._last_status_at = 0.0
+        self._connection_state = "new"
         self._last_log_times = {}
         self._suppressed_log_counts = {}
         self._reconnecting = False
+        self._reconnect_inflight = False
+        self._stopped = False
+        self._connection_generation = 0
+        self._state_lock = threading.RLock()
 
     def _headers(self):
         return {
@@ -66,52 +72,139 @@ class TwitchEventSubClient:
         }
 
     def connect(self):
-        self._subscribe_retry_cache = set()
-        self._last_keepalive_summary_at = time.monotonic()
-        self.logger("[EVENTSUB] Connecting to WebSocket:", self.websocket_url)
-        self.ws = websocket.WebSocketApp(
-            self.websocket_url,
-            on_open=self._on_open,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close,
-        )
-        threading.Thread(
-            target=lambda: self.ws.run_forever(ping_interval=20, ping_timeout=10),
-            daemon=True,
-        ).start()
+        return self._start_connection(reset_stopped=True)
+
+    def _start_connection(self, *, reset_stopped):
+        with self._state_lock:
+            if reset_stopped:
+                self._stopped = False
+            elif self._stopped:
+                return False
+            self._subscribe_retry_cache = set()
+            self._last_keepalive_summary_at = time.monotonic()
+            self._connection_generation += 1
+            generation = self._connection_generation
+            websocket_url = self.websocket_url
+
+        self.logger("[EVENTSUB] Connecting to WebSocket")
+        try:
+            ws = websocket.WebSocketApp(
+                websocket_url,
+                on_open=lambda socket: self._on_open(socket, generation),
+                on_message=lambda socket, message: self._on_message(socket, message, generation),
+                on_error=lambda socket, error: self._on_error(socket, error, generation),
+                on_close=lambda socket, close_status_code, close_msg: self._on_close(
+                    socket,
+                    close_status_code,
+                    close_msg,
+                    generation,
+                ),
+            )
+        except Exception:
+            with self._state_lock:
+                if generation == self._connection_generation:
+                    self._reconnect_inflight = False
+                    self._reconnecting = False
+            raise
+
+        with self._state_lock:
+            if self._stopped or generation != self._connection_generation:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+                return False
+            self.ws = ws
+        try:
+            threading.Thread(
+                target=lambda socket=ws: socket.run_forever(ping_interval=20, ping_timeout=10),
+                daemon=True,
+            ).start()
+        except Exception:
+            with self._state_lock:
+                if generation == self._connection_generation:
+                    self.ws = None
+                    self._reconnect_inflight = False
+                    self._reconnecting = False
+            try:
+                ws.close()
+            except Exception:
+                pass
+            raise
+        return True
 
     def stop(self):
+        with self._state_lock:
+            self._stopped = True
+            self._connection_generation += 1
+            self._reconnect_inflight = False
+            self._reconnecting = False
+            ws = self.ws
+            self.ws = None
         self._flush_keepalive_summary()
         try:
-            if self.ws is not None:
-                self.ws.close()
+            if ws is not None:
+                ws.close()
         except Exception:
             pass
 
-    def _on_open(self, ws):
+    def _callback_allowed(self, ws, generation):
+        with self._state_lock:
+            return (
+                not self._stopped
+                and generation == self._connection_generation
+                and ws is self.ws
+            )
+
+    def _mark_reconnect_start(self, reconnect_url, ws, generation):
+        with self._state_lock:
+            if self._stopped or generation != self._connection_generation or ws is not self.ws:
+                return None
+            if self._reconnect_inflight:
+                return None
+            self._reconnect_inflight = True
+            self._reconnecting = True
+            self.websocket_url = reconnect_url
+            self._connection_generation += 1
+            old_ws = self.ws
+            self.ws = None
+            return old_ws
+
+    def _on_open(self, ws, generation):
+        if not self._callback_allowed(ws, generation):
+            return
         if self._reconnecting:
             self.logger("[EVENTSUB] Reconnect success")
             self._reconnecting = False
+            self._reconnect_inflight = False
         else:
             self.logger("[EVENTSUB] Connected")
         self.emit_connection_status("connected", "WebSocket connected")
 
-    def _on_error(self, ws, error):
+    def _on_error(self, ws, error, generation):
+        if not self._callback_allowed(ws, generation):
+            return
         self._flush_keepalive_summary()
         message = str(error)
         prefix = "[EVENTSUB] Ping/pong timeout" if "ping" in message.lower() and "timed out" in message.lower() else "[ERROR] EventSub WebSocket error"
         if self._reconnecting:
             self._log_rate_limited(f"reconnect-failed:{message}", f"[EVENTSUB] Reconnect failed: {message}")
+            self._reconnect_inflight = False
         self._log_rate_limited(f"ws-error:{message}", f"{prefix}: {message}")
         self.emit_connection_status("error", str(error))
 
-    def _on_close(self, ws, close_status_code, close_msg):
+    def _on_close(self, ws, close_status_code, close_msg, generation):
+        if not self._callback_allowed(ws, generation):
+            return
         self._flush_keepalive_summary()
         self.logger("[EVENTSUB] Disconnected:", close_status_code, close_msg)
+        if self._reconnecting:
+            self._reconnect_inflight = False
         self.emit_connection_status("closed", f"{close_status_code or ''} {close_msg or ''}".strip())
 
-    def _on_message(self, ws, message):
+    def _on_message(self, ws, message, generation):
+        if not self._callback_allowed(ws, generation):
+            return
         payload = json.loads(message)
         metadata = payload.get("metadata", {})
         message_type = metadata.get("message_type")
@@ -119,7 +212,7 @@ class TwitchEventSubClient:
 
         if message_type == "session_welcome":
             self.session_id = payload["payload"]["session"]["id"]
-            self.logger("[EVENTSUB] Session ready:", self.session_id)
+            self.logger("[EVENTSUB] Session ready")
             self.emit_connection_status("ready", "EventSub session ready")
             self.subscribe_all()
             return
@@ -133,8 +226,7 @@ class TwitchEventSubClient:
                 if eventsub_message_id and "_eventsub_message_id" not in event:
                     event["_eventsub_message_id"] = eventsub_message_id
                 chatter = event.get("chatter_user_login", "")
-                text = event.get("message", {}).get("text", "")
-                self.logger(f"[EVENTSUB] Chat event received from {chatter}: {text}")
+                self.logger(f"[EVENTSUB] Chat event received from {chatter}")
                 if callable(self.on_chat_message):
                     self.on_chat_message(event)
             elif callable(self.on_event):
@@ -149,17 +241,18 @@ class TwitchEventSubClient:
         if message_type == "session_reconnect":
             reconnect_url = payload["payload"]["session"].get("reconnect_url")
             if reconnect_url:
+                old_ws = self._mark_reconnect_start(reconnect_url, ws, generation)
+                if old_ws is None:
+                    self._log_rate_limited("reconnect-duplicate", "[EVENTSUB] Reconnect already in progress")
+                    return
                 self._flush_keepalive_summary()
-                self.websocket_url = reconnect_url
-                self._reconnecting = True
                 self.logger("[EVENTSUB] Reconnecting")
                 self.emit_connection_status("reconnecting", "EventSub reconnect requested")
+                self._start_connection(reset_stopped=False)
                 try:
-                    if self.ws is not None:
-                        self.ws.close()
+                    old_ws.close()
                 except Exception:
                     pass
-                self.connect()
             return
 
         if message_type == "revocation":
@@ -192,7 +285,7 @@ class TwitchEventSubClient:
         if self._keepalive_count_since_log <= 0:
             return
         now = now or time.monotonic()
-        self.logger(f"[EVENTSUB] Keepalive received x{self._keepalive_count_since_log}")
+        self.logger(f"[EVENTSUB] Connection healthy - {self._keepalive_count_since_log} keepalives received")
         self._keepalive_count_since_log = 0
         self._last_keepalive_summary_at = now
 
@@ -207,6 +300,38 @@ class TwitchEventSubClient:
             self._suppressed_log_counts[key] = 0
         else:
             self._suppressed_log_counts[key] = suppressed + 1
+
+    def health_snapshot(self, *, stale_after_seconds=90):
+        now = time.monotonic()
+        with self._state_lock:
+            last_activity_at = max(
+                float(self._last_message_at or 0.0),
+                float(self._last_keepalive_at or 0.0),
+                float(self._last_status_at or 0.0),
+            )
+            idle_seconds = (now - last_activity_at) if last_activity_at else None
+            state = self._connection_state
+            stopped = self._stopped
+            has_socket = self.ws is not None
+            reconnecting = self._reconnecting or self._reconnect_inflight
+
+        stale = False
+        if not stopped:
+            if state in {"error", "closed"} and not reconnecting:
+                stale = True
+            elif last_activity_at and idle_seconds is not None and idle_seconds >= float(stale_after_seconds):
+                stale = True
+            elif not has_socket and state not in {"new", "reconnecting"}:
+                stale = True
+
+        return {
+            "state": state,
+            "idle_seconds": idle_seconds,
+            "stale": stale,
+            "stopped": stopped,
+            "has_socket": has_socket,
+            "reconnecting": reconnecting,
+        }
 
     def subscribe_all(self):
         for request in self.subscription_requests:
@@ -240,6 +365,9 @@ class TwitchEventSubClient:
         return (response.text or f"HTTP {response.status_code}").strip()
 
     def emit_connection_status(self, state, message=""):
+        with self._state_lock:
+            self._connection_state = str(state or "")
+            self._last_status_at = time.monotonic()
         if not callable(self.on_connection_status):
             return
         try:
@@ -340,9 +468,9 @@ class TwitchEventSubClient:
             params={"id": subscription_id},
             timeout=REQUEST_TIMEOUT,
         )
-        self.logger(f"[EVENTSUB] Delete subscription {subscription_id}: {response.status_code}")
+        self.logger(f"[EVENTSUB] Deleted conflicting subscription: HTTP {response.status_code}")
         if response.text:
-            self.logger("[EVENTSUB] Delete response:", response.text)
+            self.logger("[EVENTSUB] Delete response body:", response.text)
         response.raise_for_status()
 
     def cleanup_conflicting_subscriptions(self, body):
@@ -362,17 +490,7 @@ class TwitchEventSubClient:
                 continue
 
             self.logger(
-                "[EVENTSUB] Removing conflicting subscription:",
-                json.dumps(
-                    {
-                        "id": subscription.get("id"),
-                        "type": subscription.get("type"),
-                        "status": subscription.get("status"),
-                        "transport": transport,
-                        "condition": condition,
-                    },
-                    ensure_ascii=False,
-                ),
+                f"[EVENTSUB] Removing conflicting subscription: {subscription.get('type')} ({subscription.get('status')})"
             )
             self.delete_subscription(subscription.get("id"))
             deleted += 1

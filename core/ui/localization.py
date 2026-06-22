@@ -735,6 +735,62 @@ LOCALIZED_STRINGS[LANGUAGE_ARABIC].update(
     }
 )
 
+LOCALIZED_STRINGS[LANGUAGE_ENGLISH].update(
+    {
+        "Connect with Twitch": "Connect with Twitch",
+        "Connect Bot Account to Twitch": "Connect Bot Account to Twitch",
+        "Connect Channel Account to Twitch": "Connect Channel Account to Twitch",
+        "A Twitch authorization page has been opened in your browser.\nEnter the code below if Twitch does not fill it automatically, then approve access.": "A Twitch authorization page has been opened in your browser.\nEnter the code below if Twitch does not fill it automatically, then approve access.",
+        "User Code": "User Code",
+        "Copy Code": "Copy Code",
+        "Open Twitch Again": "Open Twitch Again",
+        "Preparing authorization": "Preparing authorization",
+        "Preparing Twitch authorization": "Preparing Twitch authorization",
+        "Waiting for Twitch authorization...": "Waiting for Twitch authorization...",
+        "Validating account": "Validating account",
+        "Saving session": "Saving session",
+        "Code copied. Waiting for Twitch authorization...": "Code copied. Waiting for Twitch authorization...",
+        "Could not open Twitch. Copy the code and open the authorization page manually.": "Could not open Twitch. Copy the code and open the authorization page manually.",
+        "Twitch authorization was not approved.": "Twitch authorization was not approved.",
+        "This authorization code has expired. Generate a new code to continue.": "This authorization code has expired. Generate a new code to continue.",
+        "Could not reach Twitch. Check your internet connection and try again.": "Could not reach Twitch. Check your internet connection and try again.",
+        "Twitch connected, but some required permissions were not approved. Please reconnect and approve all requested access.": "Twitch connected, but some required permissions were not approved. Please reconnect and approve all requested access.",
+        "Twitch authorization failed. Please try again.": "Twitch authorization failed. Please try again.",
+        "Secure session saved": "Secure session saved",
+        "Required Twitch permissions are requested automatically for this role.": "Required Twitch permissions are requested automatically for this role.",
+        "Developer Diagnostics: Legacy Redirect Login": "Developer Diagnostics: Legacy Redirect Login",
+        "Connected automatically": "Connected automatically",
+    }
+)
+
+LOCALIZED_STRINGS[LANGUAGE_ARABIC].update(
+    {
+        "Connect with Twitch": "\u0627\u0644\u0631\u0628\u0637 \u0645\u0639 \u062a\u0648\u064a\u062a\u0634",
+        "Connect Bot Account to Twitch": "\u0631\u0628\u0637 \u062d\u0633\u0627\u0628 \u0627\u0644\u0628\u0648\u062a \u0628\u062a\u0648\u064a\u062a\u0634",
+        "Connect Channel Account to Twitch": "\u0631\u0628\u0637 \u062d\u0633\u0627\u0628 \u0627\u0644\u0642\u0646\u0627\u0629 \u0628\u062a\u0648\u064a\u062a\u0634",
+        "A Twitch authorization page has been opened in your browser.\nEnter the code below if Twitch does not fill it automatically, then approve access.": "\u062a\u0645 \u0641\u062a\u062d \u0635\u0641\u062d\u0629 \u062a\u0641\u0648\u064a\u0636 \u062a\u0648\u064a\u062a\u0634 \u0641\u064a \u0627\u0644\u0645\u062a\u0635\u0641\u062d.\n\u0623\u062f\u062e\u0644 \u0627\u0644\u0631\u0645\u0632 \u0623\u062f\u0646\u0627\u0647 \u0625\u0630\u0627 \u0644\u0645 \u064a\u0638\u0647\u0631 \u062a\u0644\u0642\u0627\u0626\u064a\u0627\u060c \u062b\u0645 \u0648\u0627\u0641\u0642 \u0639\u0644\u0649 \u0627\u0644\u0648\u0635\u0648\u0644.",
+        "User Code": "\u0631\u0645\u0632 \u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645",
+        "Copy Code": "\u0646\u0633\u062e \u0627\u0644\u0631\u0645\u0632",
+        "Open Twitch Again": "\u0641\u062a\u062d \u062a\u0648\u064a\u062a\u0634 \u0645\u0631\u0629 \u0623\u062e\u0631\u0649",
+        "Preparing authorization": "\u062c\u0627\u0631 \u062a\u062c\u0647\u064a\u0632 \u0627\u0644\u062a\u0641\u0648\u064a\u0636",
+        "Preparing Twitch authorization": "\u062c\u0627\u0631 \u062a\u062c\u0647\u064a\u0632 \u062a\u0641\u0648\u064a\u0636 \u062a\u0648\u064a\u062a\u0634",
+        "Waiting for Twitch authorization...": "\u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u062a\u0641\u0648\u064a\u0636 \u062a\u0648\u064a\u062a\u0634...",
+        "Validating account": "\u062c\u0627\u0631 \u0627\u0644\u062a\u062d\u0642\u0642 \u0645\u0646 \u0627\u0644\u062d\u0633\u0627\u0628",
+        "Saving session": "\u062c\u0627\u0631 \u062d\u0641\u0638 \u0627\u0644\u062c\u0644\u0633\u0629",
+        "Code copied. Waiting for Twitch authorization...": "\u062a\u0645 \u0646\u0633\u062e \u0627\u0644\u0631\u0645\u0632. \u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u062a\u0641\u0648\u064a\u0636 \u062a\u0648\u064a\u062a\u0634...",
+        "Could not open Twitch. Copy the code and open the authorization page manually.": "\u062a\u0639\u0630\u0631 \u0641\u062a\u062d \u062a\u0648\u064a\u062a\u0634. \u0627\u0646\u0633\u062e \u0627\u0644\u0631\u0645\u0632 \u0648\u0627\u0641\u062a\u062d \u0635\u0641\u062d\u0629 \u0627\u0644\u062a\u0641\u0648\u064a\u0636 \u064a\u062f\u0648\u064a\u0627.",
+        "Twitch authorization was not approved.": "\u0644\u0645 \u062a\u062a\u0645 \u0627\u0644\u0645\u0648\u0627\u0641\u0642\u0629 \u0639\u0644\u0649 \u062a\u0641\u0648\u064a\u0636 \u062a\u0648\u064a\u062a\u0634.",
+        "This authorization code has expired. Generate a new code to continue.": "\u0627\u0646\u062a\u0647\u062a \u0635\u0644\u0627\u062d\u064a\u0629 \u0631\u0645\u0632 \u0627\u0644\u062a\u0641\u0648\u064a\u0636. \u0623\u0646\u0634\u0626 \u0631\u0645\u0632\u0627 \u062c\u062f\u064a\u062f\u0627 \u0644\u0644\u0645\u062a\u0627\u0628\u0639\u0629.",
+        "Could not reach Twitch. Check your internet connection and try again.": "\u062a\u0639\u0630\u0631 \u0627\u0644\u0648\u0635\u0648\u0644 \u0625\u0644\u0649 \u062a\u0648\u064a\u062a\u0634. \u062a\u062d\u0642\u0642 \u0645\u0646 \u0627\u062a\u0635\u0627\u0644\u0643 \u0628\u0627\u0644\u0625\u0646\u062a\u0631\u0646\u062a \u062b\u0645 \u062d\u0627\u0648\u0644 \u0645\u062c\u062f\u062f\u0627.",
+        "Twitch connected, but some required permissions were not approved. Please reconnect and approve all requested access.": "\u062a\u0645 \u0631\u0628\u0637 \u062a\u0648\u064a\u062a\u0634\u060c \u0644\u0643\u0646 \u0628\u0639\u0636 \u0627\u0644\u0635\u0644\u0627\u062d\u064a\u0627\u062a \u0627\u0644\u0645\u0637\u0644\u0648\u0628\u0629 \u0644\u0645 \u062a\u062a\u0645 \u0627\u0644\u0645\u0648\u0627\u0641\u0642\u0629 \u0639\u0644\u064a\u0647\u0627. \u0623\u0639\u062f \u0627\u0644\u0631\u0628\u0637 \u0648\u0648\u0627\u0641\u0642 \u0639\u0644\u0649 \u0643\u0644 \u0627\u0644\u0648\u0635\u0648\u0644 \u0627\u0644\u0645\u0637\u0644\u0648\u0628.",
+        "Twitch authorization failed. Please try again.": "\u0641\u0634\u0644 \u062a\u0641\u0648\u064a\u0636 \u062a\u0648\u064a\u062a\u0634. \u062d\u0627\u0648\u0644 \u0645\u062c\u062f\u062f\u0627.",
+        "Secure session saved": "\u062a\u0645 \u062d\u0641\u0638 \u0627\u0644\u062c\u0644\u0633\u0629 \u0628\u0623\u0645\u0627\u0646",
+        "Required Twitch permissions are requested automatically for this role.": "\u064a\u0637\u0644\u0628 \u0627\u0644\u062a\u0637\u0628\u064a\u0642 \u0635\u0644\u0627\u062d\u064a\u0627\u062a \u062a\u0648\u064a\u062a\u0634 \u0627\u0644\u0645\u0637\u0644\u0648\u0628\u0629 \u062a\u0644\u0642\u0627\u0626\u064a\u0627 \u0644\u0647\u0630\u0627 \u0627\u0644\u062f\u0648\u0631.",
+        "Developer Diagnostics: Legacy Redirect Login": "\u062a\u0634\u062e\u064a\u0635 \u0627\u0644\u0645\u0637\u0648\u0631: \u062f\u062e\u0648\u0644 \u0627\u0644\u062a\u062d\u0648\u064a\u0644 \u0627\u0644\u0642\u062f\u064a\u0645",
+        "Connected automatically": "\u062a\u0645 \u0627\u0644\u0627\u062a\u0635\u0627\u0644 \u062a\u0644\u0642\u0627\u0626\u064a\u0627",
+    }
+)
+
 AVAILABLE_LANGUAGES = tuple(LOCALIZED_STRINGS.keys())
 
 

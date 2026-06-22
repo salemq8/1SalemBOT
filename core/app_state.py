@@ -1,8 +1,11 @@
 import json
+import os
 import shutil
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
+from .json_store import save_json_atomic
 from .app_paths import (
     APP_STORAGE_DIR,
     LEGACY_ALERTS_FILE,
@@ -155,6 +158,10 @@ def default_music_command():
         "action": "",
         "query": "",
         "timestamp": "",
+        "source": "",
+        "requested_by": "",
+        "raw_text": "",
+        "metadata": {},
     }
 
 
@@ -214,7 +221,7 @@ def ensure_app_files(
         save_json(settings_file, default_settings())
 
     if not users_file.exists():
-        users_file.write_text("{}", encoding="utf-8")
+        save_json(users_file, {})
 
     if not dashboard_state_file.exists():
         save_json(dashboard_state_file, default_dashboard_state())
@@ -232,14 +239,31 @@ def ensure_app_files(
 
 
 def load_json(path: Path, default):
+    path = Path(path)
     try:
         if not path.exists():
             return default
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
+        backup_corrupt_json(path)
         return default
 
 
+def backup_corrupt_json(path: Path):
+    try:
+        if not path.exists():
+            return None
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup_path = path.with_name(f"{path.name}.corrupt-{stamp}.bak")
+        counter = 1
+        while backup_path.exists():
+            backup_path = path.with_name(f"{path.name}.corrupt-{stamp}-{counter}.bak")
+            counter += 1
+        shutil.copy2(path, backup_path)
+        return backup_path
+    except Exception:
+        return None
+
+
 def save_json(path: Path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return save_json_atomic(Path(path), data)

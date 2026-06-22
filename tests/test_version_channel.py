@@ -7,7 +7,7 @@ from core import version
 class VersionChannelTests(unittest.TestCase):
     def test_beta_label_and_artifact_tags(self):
         self.assertEqual(version.version_label("1.8", "beta"), "1.8 Beta")
-        self.assertEqual(version.artifact_version_tag("1.8", "beta"), "1.8_Beta")
+        self.assertEqual(version.artifact_version_tag("1.8", "beta"), "1.8-Beta")
         self.assertEqual(version.source_version_tag("1.8", "beta"), "1.8-Beta")
 
     def test_stable_label_and_artifact_tags(self):
